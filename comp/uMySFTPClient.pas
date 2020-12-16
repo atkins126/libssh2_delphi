@@ -1,4 +1,4 @@
-{ uMySFTPClient.pas } // version: 2020.0919.0015
+{ uMySFTPClient.pas } // version: 2020.1114.2017
 { **
   *  Copyright (c) 2010, Zeljko Marjanovic <savethem4ever@gmail.com>
   *  This code is licensed under MPL 1.1
@@ -16,7 +16,7 @@
 unit uMySFTPClient;
 
 {$i libssh2.inc}
-
+{$IFDEF DEBUG}{$D+,L+}{$ENDIF}
 interface
 
 uses
@@ -24,17 +24,35 @@ uses
   HVDll, // alternative for: external ?dll_name name '?function_name' delayed;
   {$ENDIF}
   {$IFDEF WIN32}
-  Windows,
+  Windows, Messages,
   {$ELSE}
   Wintypes, WinProcs,
   {$ENDIF}
-  Classes, SysUtils, WinSock, libssh2, libssh2_sftp;
+  Classes, SysUtils,
+  WinSock,
+  //{$IFDEF MSWINDOWS}
+  //Winsock2, {$DEFINE _WINSOCK2_}
+  //{$ENDIF MSWINDOWS}
+  SyncObjs,
+  libssh2, libssh2_sftp;
+
+{$ifdef FPC}{$define _inline_}{$else}{$ifdef CONDITIONALEXPRESSIONS}{$IF CompilerVersion >= 25.00}{$define _inline_}{$IFEND}{$endif}{$endif}
 
 const
   AF_INET6 = 23;
   SFTPCLIENT_VERSION = '0.5';
 
 type
+  {$if not declared(AnsiString)}
+  AnsiString = string;
+  {$ifend}
+  {$if not declared(RawByteString)}
+  RawByteString = AnsiString;
+  {$ifend}
+  {$if not declared(UnicodeString)}
+  UnicodeString = WideString;
+  {$ifend}
+
   TSFTPItemType = (sitUnknown, sitDirectory, sitFile, sitSymbolicLink, sitSymbolicLinkDir,
     sitBlockDev, sitCharDev, sitFIFO, sitSocket);
   TIPVersion = (IPvUNSPEC = 0, IPv4 = AF_INET, IPv6 = AF_INET6);
@@ -182,6 +200,7 @@ type
     FConnected: Boolean;
     FCanceled: Boolean;
     FLastErrStr: string;
+    FBlockingMode: Boolean;
     FKeepAlive: Boolean;
     FTimeOut: Integer; // keepalive timeout interval in seconds
     FSockBufLen: Integer;
@@ -200,14 +219,22 @@ type
     procedure DoOnFingerprint(const AState: TFingerprintState; var AAction: TConnectHashAction);
     function GetVersion: string;
     function GetLibString: string;
+    procedure SetBlockingMode(Value: Boolean);
+    procedure SetKeepAlive(Value: Boolean);
+    procedure SetTimeOut(Value: Integer);
   protected
     function GetSessionPtr: PLIBSSH2_SESSION;
     function GetSocketHandle: Integer;
     function CreateSocket: Integer; virtual;
     function ConnectSocket(var S: Integer): Boolean; virtual;
     procedure RaiseSSHError(const AMsg: string = ''; E: Integer = 0); virtual;
-    function MyEncode(const WS: WideString): AnsiString; virtual;
-    function MyDecode(const S: AnsiString): WideString; virtual;
+    function MyEncode(const WS: UnicodeString): AnsiString; virtual;
+    function MyDecode(const S: AnsiString): UnicodeString; virtual;
+
+    function waitsocket(timeout_tv_sec: Longint = 10): Integer;
+
+    property Socket: Integer read FSocket;
+    property Session: PLIBSSH2_SESSION read FSession;
   public
     constructor Create(AOwner: TComponent); override;
     destructor Destroy; override;
@@ -222,8 +249,9 @@ type
     property Host: string read FHost write FHost;
     property Port: Word read FPort write FPort default 22;
     property IPVersion: TIPVersion read FIPVersion write FIPVersion;
-    property KeepAlive: Boolean read FKeepAlive write FKeepAlive;
-    property TimeOut: Integer read FTimeOut write FTimeOut;
+    property BlockingMode: Boolean read FBlockingMode write SetBlockingMode default True;
+    property KeepAlive: Boolean read FKeepAlive write SetKeepAlive;
+    property TimeOut: Integer read FTimeOut write SetTimeOut;
     property SockSndRcvBufLen: Integer read FSockBufLen write FSockBufLen;
     property AuthModes: TAuthModes read FAuthModes write SetAuthModes default [amTryAll];
     property UserName: string read FUserName write FUserName;
@@ -260,36 +288,46 @@ type
     procedure SetCurrentDir(const Value: string);
     procedure DoMakeDir(const LDir: WideString; AMode: Integer = 0; ARecurse: Boolean = False);
   protected
-    procedure RaiseSSHError(const AMsg: string = ''; E: Integer = 0); override;
+    //-procedure RaiseSSHError(const AMsg: string = ''; E: Integer = 0); override;
     function ChangeDir(const APath: WideString): Boolean;
   public
     constructor Create(AOwner: TComponent); override;
     destructor Destroy; override;
 
+    function GetLastSSHError(E: Integer = 0): string; override;
+
     procedure Connect(const ARemoteDir: WideString = '.'); reintroduce;
     procedure Disconnect; override;
-    function GetLastSSHError(E: Integer = 0): string; override;
+
     procedure Cancel(ADisconnect: Boolean = True); override;
 
+    function OpenDir(const APath: WideString; AutoMake: Boolean = False; MakeMode: Integer = 0): Boolean;
+    function ExpandCurrentDirPath: WideString;
     procedure List(const AStartPath: WideString = '');
+
+    function Exists(const ASourceFileName: WideString): Boolean;
+    function ExistsFile(const ASourceFileName: WideString): Boolean;
+    function ExistsDir(const ASourceFileName: WideString): Boolean;
+
+    procedure Delete(const AName: WideString);
     procedure DeleteFile(const AFileName: WideString);
     procedure DeleteDir(const ADirName: WideString);
+
     procedure MakeDir(const ADirName: WideString; AMode: Integer = 0; ARecurse: Boolean = False);
-    {+}
-    function OpenDir(const APath: WideString; AutoMake: Boolean = False; MakeMode: Integer = 0): Boolean;
-    function Exists(const ASourceFileName: WideString): Boolean;
-    {+.}
+
     procedure Get(const ASourceFileName: WideString; const ADest: TStream; AResume: Boolean);
     procedure Put(const ASource: TStream; const ADestFileName: WideString;
       AOverwrite: Boolean = False); // TODO: AResume: Boolean;
+
     procedure Rename(const AOldName, ANewName: WideString);
     procedure MakeSymLink(const AOrigin, ADest: WideString);
     function ResolveSymLink(const AOrigin: WideString; var AAtributes: LIBSSH2_SFTP_ATTRIBUTES;
       ARealPath: Boolean = False): string;
+
+    function GetAttributes(const APath: WideString; var AAtribs: LIBSSH2_SFTP_ATTRIBUTES): Boolean;
     procedure SetAttributes(const APath: WideString; AAtribs: LIBSSH2_SFTP_ATTRIBUTES);
     procedure SetPermissions(const APath: WideString; APerms: Cardinal); overload;
     procedure SetPermissions(const APath: WideString; const AOctalPerms: string); overload;
-    function ExpandCurrentDirPath: WideString;
 
     property ReadBufferLen: Cardinal read FReadBufLen write FReadBufLen;
     property WriteBufferLen: Cardinal read FWriteBufLen write FWriteBufLen;
@@ -316,27 +354,61 @@ type
 
 function ToOctal(X: Cardinal; const Len: Integer = 4): string;
 function FromOctal(const S: string): Cardinal;
-function EncodeStr(const WS: WideString; ACodePage: Word = CP_UTF8): AnsiString;
-function DecodeStr(const S: AnsiString; ACodePage: Word = CP_UTF8): WideString;
+function EncodeStr(const WS: UnicodeString; ACodePage: Word = CP_UTF8): AnsiString;
+function DecodeStr(const S: AnsiString; ACodePage: Word = CP_UTF8): UnicodeString;
 
 implementation
 
 uses
   DateUtils, Forms, StrUtils, WideStrUtils;
 
-procedure dbg(const S: string); inline;
+function strwhen(const s: string; cond: Boolean): string; {$ifdef _inline_}inline;{$endif}
+begin
+  if cond then Result := s else Result := '';
+end;
+
+procedure dbg(const S: string); {$ifdef _inline_}inline;{$endif}
 begin
   {$IFDEF MSWINDOWS}
   if Length(S) > 0 then OutputDebugString(PChar('libssh2:> ' + S));
   {$ENDIF}
 end;
 
-procedure dbgw(const S: WideString); inline;
+procedure dbgw(const S: UnicodeString); {$ifdef _inline_}inline;{$endif}
 begin
   {$IFDEF MSWINDOWS}
   if Length(S) > 0 then OutputDebugStringW(PWideChar('libssh2:> ' + S));
   {$ENDIF}
 end;
+
+function bool2int(b: Boolean): Integer; {$ifdef _inline_}inline;{$endif}
+begin
+  if b then Result := 1 else Result := 0;
+end;
+
+{function sftp_extract_file_path_a(const S: AnsiString): AnsiString;
+var i: Integer;
+begin
+  for i:= Length(S) downto 1 do begin
+    if S[1] = '/' then begin
+       Result := Copy(S, 1, i);
+       Exit;
+    end;
+  end;
+  Result := S;
+end;
+
+function sftp_extract_file_name_a(const S: AnsiString): AnsiString;
+var i: Integer;
+begin
+  for i:= Length(S) downto 1 do begin
+    if S[1] = '/' then begin
+       Result := Copy(S, i+, Length(S));
+       Exit;
+    end;
+  end;
+  Result := S;
+end;}
 
 var
   GSSH2Init: Integer;
@@ -379,15 +451,89 @@ procedure freeaddrinfo(ai: PAddrInfo); stdcall; external dll_ws2_32_name name 'f
   {$ifdef allow_delayed} delayed{$endif};
 {$ifend !declared(uHVDll)}
 
-function TestBit(const ABits, AVal: Cardinal): Boolean; inline;
+function TestBit(const ABits, AVal: Cardinal): Boolean; {$ifdef _inline_}inline;{$endif}
 begin
   Result := ABits and AVal { = AVal } <> 0;
 end;
 
-procedure ProcessMsgs;
+var
+  WSData: TWSAData;
+  hLockWSData: TCriticalSection;
+
+procedure WSDataInit();
 begin
-  Application.ProcessMessages;
+  hLockWSData := TCriticalSection.Create;
+  FillChar(WSData, SizeOf(WsaData), 0);
 end;
+
+function WSDataStartup(): integer;
+begin
+  hLockWSData.Enter;
+  try
+    if WSData.wVersion = 0 then // not initialized
+    begin
+      {$IFDEF DEBUG}
+      {if FDebugMode then }dbg('libssh2: WSAStartup:');
+      {$ENDIF}
+      Result := WSAStartup({MakeWord(2, 2)}$0202, WSData);
+      {$IFDEF DEBUG}
+      {if FDebugMode then }dbg('libssh2: WSAStartup. R: '+IntToStr(Result)+'; Version: '+IntToStr(WSData.wVersion));
+      {$ENDIF}
+    end
+    else
+      Result := 0;
+  finally
+    hLockWSData.Leave;
+  end;
+end;
+
+procedure WSDataCleanup();
+var R: Integer;
+begin
+  hLockWSData.Enter;
+  try
+    if WSData.wVersion <> 0 then
+    begin
+      {$IFDEF DEBUG}
+      {if FDebugMode then }dbg('libssh2: WSACleanup:');
+      {$ENDIF}
+      R := WSACleanup();
+      {$IFDEF DEBUG}
+      {if FDebugMode then }dbg('libssh2: WSACleanup. R:'+IntToStr(R));
+      {$ENDIF}
+      if R = 0 then
+        WSData.wVersion := 0;
+    end;
+   finally
+    hLockWSData.Leave;
+  end;
+end;
+
+procedure WSDataFInit();
+begin
+  if not IsLibrary then // https://docs.microsoft.com/en-us/windows/win32/api/winsock/nf-winsock-wsacleanup
+    WSDataCleanup();
+  FreeAndNil(hLockWSData);
+end;
+
+{procedure ProcessMsgs();
+var Msg: TMsg;
+begin
+  if (GetCurrentThreadID = MainThreadID)
+    and (Application <> nil) and (Application.MainForm <> nil) then
+  begin
+    Application.ProcessMessages;
+  end
+  else
+  begin
+    if PeekMessage(Msg, 0, 0, 0, PM_REMOVE) then begin
+      if Msg.Message <> WM_QUIT then begin
+        TranslateMessage(Msg);
+        DispatchMessage(Msg);
+      end;
+    end;
+  end;
+end;}
 
 function FromOctal(const S: string): Cardinal;
 var
@@ -419,51 +565,188 @@ begin
     Result := Copy(Result, Length(Result) - Len + 1, Len);
 end;
 
-function EncodeStr(const WS: WideString; ACodePage: Word): AnsiString;
-var
-  L: Integer;
-  Flags: Cardinal;
-begin
-  if ACodePage = CP_UTF8 then
-  begin
-    Result := UTF8Encode(WS);
-    Exit;
-  end;
+{$if not declared(LongBool)}
+type
+  LongBool = BOOL;
+{$ifend}
+{$if not declared(PLongBool)}
+type
+  PLongBool = ^LongBool;
+{$ifend}
 
-  Result := '';
-  Flags := 0; // WC_COMPOSITECHECK;
-  L := WideCharToMultiByte(ACodePage, Flags, @WS[1], -1, nil, 0, nil, nil);
-  if L > 1 then
-  begin
-    SetLength(Result, L - 1);
-    WideCharToMultiByte(ACodePage, Flags, @WS[1], -1, @Result[1], L - 1, nil, nil)
+{$if defined(MSWINDOWS) and not declared(LocaleCharsFromUnicode)}
+function LocaleCharsFromUnicode(CodePage, Flags: Cardinal;
+  UnicodeStr: PWideChar; UnicodeStrLen: Integer; LocaleStr: PAnsiChar;
+  LocaleStrLen: Integer; DefaultChar: PAnsiChar; UsedDefaultChar: PLongBool): Integer;
+  //{$ifdef FPC}inline;{$else}{$ifdef CONDITIONALEXPRESSIONS}{$IF CompilerVersion >= 25.00}inline;{$IFEND}{$endif}{$endif}
+  {$ifdef _inline_}inline;{$endif}
+begin
+  Result := WideCharToMultiByte(CodePage, Flags, UnicodeStr, UnicodeStrLen, LocaleStr,
+    LocaleStrLen, DefaultChar, PBOOL(UsedDefaultChar));
+end;
+{$ifend}
+{$if defined(FPC) and declared(widestringmanager) and not declared(LocaleCharsFromUnicode)} // TODO: FPC check
+function LocaleCharsFromUnicode(CodePage, Flags: Cardinal;
+  UnicodeStr: PWideChar; UnicodeStrLen: Integer; LocaleStr: PAnsiChar;
+  LocaleStrLen: Integer; DefaultChar: PAnsiChar; UsedDefaultChar: PLongBool): Integer;
+var S: RawByteString;
+begin
+  widestringmanager.Unicode2AnsiMoveProc(UnicodeStr, S, CodePage, UnicodeStrLen);
+  Result := Length(S);
+  if (Result > 0) and Assigned(LocaleStr) then begin
+    if LocaleStrLen < Result then
+      Result := LocaleStrLen;
+    if Result > 0 then begin
+      Move(S[1], LocaleStr^, Result);
+    end;
   end;
 end;
+{$ifend}
 
-function DecodeStr(const S: AnsiString; ACodePage: Word): WideString;
-var
-  L: Integer;
-  Flags: Cardinal;
+{$if defined(MSWINDOWS) and not declared(UnicodeFromLocaleChars)}
+function UnicodeFromLocaleChars(CodePage, Flags: Cardinal; LocaleStr: PAnsiChar;
+  LocaleStrLen: Integer; UnicodeStr: PWideChar; UnicodeStrLen: Integer): Integer;
+  //{$ifdef FPC}inline;{$else}{$ifdef CONDITIONALEXPRESSIONS}{$IF CompilerVersion >= 25.00}inline;{$IFEND}{$endif}{$endif}
+  {$ifdef _inline_}inline;{$endif}
 begin
-  if ACodePage = CP_UTF8 then
+  Result := MultiByteToWideChar(CodePage, Flags, LocaleStr, LocaleStrLen,
+    UnicodeStr, UnicodeStrLen);
+end;
+{$ifend}
+{$if defined(FPC) and declared(widestringmanager) and not declared(UnicodeFromLocaleChars)} // TODO: FPC check
+function UnicodeFromLocaleChars(CodePage, Flags: Cardinal; LocaleStr: PAnsiChar;
+  LocaleStrLen: Integer; UnicodeStr: PWideChar; UnicodeStrLen: Integer): Integer;
+var U: UnicodeString;
+begin
+  widestringmanager.Ansi2UnicodeMoveProc(LocaleStr, CodePage, U, LocaleStrLen);
+  Result := Length(U);
+  if (Result > 0) and Assigned(UnicodeStr) then begin
+    if UnicodeStrLen < Result then
+      Result := UnicodeStrLen;
+    if Result > 0 then begin
+      Move(U[1], UnicodeStr^, Result);
+    end;
+  end;
+end;
+{$ifend}
+
+{.$if not declared(EncodeStr)}
+function EncodeStr(const WS: UnicodeString; ACodePage: Word): AnsiString;
+var L: Integer;
+{$if defined(FPC) and declared(widestringmanager)}
+  S: RawByteString;
+{$elseif declared(LocaleCharsFromUnicode)}
+  Flags: Cardinal;
+{$elseif declared(TEncoding)}
+  E: TEncoding; B: TBytes;
+{$ifend}
+begin
+  Result := '';
+  L := Length(WS);
+  if L = 0 then Exit;
+  if ACodePage = CP_UTF8 then begin
+    Result := UTF8Encode(WS);
+    Exit;
+  end else if ACodePage = 0 then begin
+    Result := AnsiString(WS);
+    Exit;
+  end;
+  {$if defined(FPC) and declared(widestringmanager)}
+  widestringmanager.Unicode2AnsiMoveProc(Pointer(WS), S, CodePage, L);
+  Result := AnsiString(S);
+  {$elseif declared(LocaleCharsFromUnicode)}
+  Flags := 0; // WC_COMPOSITECHECK;
+  L := LocaleCharsFromUnicode(ACodePage, Flags, @WS[1], -1, nil, 0, nil, nil);
+  if L > 1 then begin
+    SetLength(Result, L - 1);
+    LocaleCharsFromUnicode(ACodePage, Flags, @WS[1], -1, @Result[1], L - 1, nil, nil)
+  end;
+  {$elseif declared(TEncoding)}
+  case ACodePage of
+    0:
+      E := TEncoding.Ansi;
+    1200:  // CP_UTF16LE
+      E := TEncoding.Unicode;
+    65001: // CP_UTF8
+      E := TEncoding.UTF8;
+    else
+    begin
+      E := TEncoding.GetEncoding(ACodePage);
+    end;
+  end;
+  B := E.GetBytes(UnicodeString(WS));
+  if not E.IsStandardEncoding(E) then
+    E.Free;
+  L := Length(B);
+  if L > 0 then
   begin
+    SetLength(Result, L);
+    Move(B[0], Result[1], L);
+  end;
+  {$else}
+  ERROR: not implemented it
+  Result := AnsiString(WS);
+  {$ifend}
+end;
+{.$ifend} // not declared(EncodeStr)
+
+{.$if not declared(DecodeStr)}
+function DecodeStr(const S: AnsiString; ACodePage: Word): UnicodeString;
+var L: Integer;
+{$if defined(FPC) and declared(widestringmanager)}
+{$elseif declared(UnicodeFromLocaleChars)}
+  Flags: Cardinal;
+{$elseif declared(TEncoding)}
+  E: TEncoding; B: TBytes;
+{$ifend}
+begin
+  Result := '';
+  L := Length(S);
+  if L = 0 then Exit;
+  if ACodePage = CP_UTF8 then begin
     {$IFDEF UNICODE} // TODO: FPC Check
     Result := UTF8ToWideString(S);
     {$ELSE}
     Result := UTF8Decode(S);
     {$ENDIF}
     Exit;
+  end else if ACodePage = 0 then begin
+    Result := UnicodeString(S);
+    Exit;
   end;
-
-  Result := '';
+  {$if defined(FPC) and declared(widestringmanager)}
+  widestringmanager.Ansi2UnicodeMoveProc(Pointer(S), CodePage, Result, L);
+  {$elseif declared(UnicodeFromLocaleChars)}
   Flags := MB_PRECOMPOSED;
-  L := MultiByteToWideChar(ACodePage, Flags, PAnsiChar(@S[1]), -1, nil, 0);
-  if L > 1 then
-  begin
+  L := UnicodeFromLocaleChars(ACodePage, Flags, PAnsiChar(@S[1]), -1, nil, 0);
+  if L > 1 then begin
     SetLength(Result, L - 1);
-    MultiByteToWideChar(ACodePage, Flags, PAnsiChar(@S[1]), -1, PWideChar(@Result[1]), L - 1);
+    UnicodeFromLocaleChars(ACodePage, Flags, PAnsiChar(@S[1]), -1, PWideChar(@Result[1]), L - 1);
   end;
+  {$elseif declared(TEncoding)}
+  case ACodePage of
+    0:
+      E := TEncoding.Ansi;
+    1200:  // CP_UTF16LE
+      E := TEncoding.Unicode;
+    65001: // CP_UTF8
+      E := TEncoding.UTF8;
+    else
+    begin
+      E := TEncoding.GetEncoding(ACodePage);
+    end;
+  end;
+  SetLength(B, L);
+  Move(S[1], B[0], L);
+  Result := UnicodeString(E.GetString(B));
+  if not E.IsStandardEncoding(E) then
+    E.Free;
+  {$else}
+  ERROR: not implemented it
+  Result := UnicodeString(S);
+  {$ifend}
 end;
+{.$ifend} // not declared(DecodeStr)
 
 { TSFTPItem }
 
@@ -632,7 +915,7 @@ const
   // this was only tested on openssh server listing
   // hence the above constants for pos,
   // dunno if this is standardized or not
-  function ExtractEntryData(ALongEntry: PAnsiChar; const APosition: Integer): string; inline;
+  function ExtractEntryData(ALongEntry: PAnsiChar; const APosition: Integer): string; // {$ifdef _inline_}inline;{$endif}
   var
     I, J, L, K: Integer;
     S: string;
@@ -786,7 +1069,7 @@ procedure TSFTPItems.SortDefault;
 var
   T: TSFTPItem;
 
-  function MyCmpWStr(const W1, W2: WideString): Integer; inline;
+  function MyCmpWStr(const W1, W2: WideString): Integer; {$ifdef _inline_}inline;{$endif}
   begin
     //Result := WideCompareStr(W1, W2) //CompareStringW(LOCALE_INVARIANT, 0, PWideChar(W1), -1, PWideChar(W2), -1);
     if W1 > W2 then
@@ -915,7 +1198,7 @@ var
   R: Integer; // last call SSH state
   sError, sErrorFirst, sException: string; // cached last SSH Error
 
-  procedure log(const S: string); inline;
+  procedure log(const S: string); {$ifdef _inline_}inline;{$endif}
   begin
     //--if ADebugMode then
     dbg('connect: ' + S); // optional!
@@ -1019,6 +1302,10 @@ var
     if ADebugMode then log('libssh2_userauth_password:'); //@dbg
     try
       R := libssh2_userauth_password(FSession, pUserName, pPassword);
+      while (R = LIBSSH2_ERROR_EAGAIN) do begin
+        waitsocket();
+        R := libssh2_userauth_password(FSession, pUserName, pPassword);
+      end;
       if ADebugMode then log('libssh2_userauth_password. R: ' + IntToStr(R)); //@dbg
       Result := R = 0;
       if not Result then CacheLastSSHError(R);
@@ -1091,6 +1378,10 @@ var
     if ADebugMode then log('libssh2_userauth_keyboard_interactive:'); //@dbg
     try
       R := libssh2_userauth_keyboard_interactive(FSession, pUserName, @KbdInteractiveCallback);
+      while (R = LIBSSH2_ERROR_EAGAIN) do begin
+        waitsocket();
+        R := libssh2_userauth_keyboard_interactive(FSession, pUserName, @KbdInteractiveCallback);
+      end;
       if ADebugMode then log('libssh2_userauth_keyboard_interactive. R: ' + IntToStr(R)); //@dbg
       Result := R = 0;
       if not Result then CacheLastSSHError(R);
@@ -1147,6 +1438,11 @@ var
     try
       R := libssh2_userauth_publickey_fromfile_ex(FSession,
         pUserName, Length(sUserName), pPubKeyPath, pPrivKeyPath, pPrivKeyPass);
+      while (R = LIBSSH2_ERROR_EAGAIN) do begin
+        waitsocket();
+        R := libssh2_userauth_publickey_fromfile_ex(FSession,
+          pUserName, Length(sUserName), pPubKeyPath, pPrivKeyPath, pPrivKeyPass);
+      end;
       if ADebugMode then log('libssh2_userauth_publickey_fromfile. R: ' + IntToStr(R)); //@dbg
       Result := R = 0;
       if not Result then CacheLastSSHError(R);
@@ -1179,6 +1475,10 @@ var
         try
           if ADebugMode then log('libssh2_agent_connect:'); //@dbg
           R := libssh2_agent_connect(Agent);
+          while (R = LIBSSH2_ERROR_EAGAIN) do begin
+            waitsocket();
+            R := libssh2_agent_connect(Agent);
+          end;
           if ADebugMode then log('libssh2_agent_connect. R: ' + IntToStr(R)); //@dbg
           if R <> 0 then CacheLastSSHError(R);
           if (R <> 0) and ADebugMode then log('Failed agent connect: ' + sError); //@dbg
@@ -1186,6 +1486,10 @@ var
           begin
             if ADebugMode then log('libssh2_agent_list_identities:'); //@dbg
             R := libssh2_agent_list_identities(Agent);
+            while (R = LIBSSH2_ERROR_EAGAIN) do begin
+              waitsocket();
+              R := libssh2_agent_list_identities(Agent);
+            end;
             if ADebugMode then log('libssh2_agent_list_identities. R: ' + IntToStr(R)); //@dbg
             if R <> 0 then CacheLastSSHError(R);
             if (R <> 0) and ADebugMode then log('Failed agent identities: ' + sError); //@dbg
@@ -1196,6 +1500,10 @@ var
               begin
                 if ADebugMode then log('libssh2_agent_get_identity:'); //@dbg
                 R := libssh2_agent_get_identity(Agent, Identity, PrevIdentity);
+                while (R = LIBSSH2_ERROR_EAGAIN) do begin
+                  waitsocket();
+                  R := libssh2_agent_get_identity(Agent, Identity, PrevIdentity);
+                end;
                 if ADebugMode then log('libssh2_agent_get_identity. R: ' + IntToStr(R)); //@dbg
                 if R <> 0 then CacheLastSSHError(R);
                 if (R <> 0) and ADebugMode then log('Failed agent identity: ' + sError); //@dbg
@@ -1208,6 +1516,10 @@ var
                   pUserName := PAnsiChar(sUserName);
                 end;
                 R := libssh2_agent_userauth(Agent, pUserName, Identity);
+                while (R = LIBSSH2_ERROR_EAGAIN) do begin
+                  waitsocket();
+                  R := libssh2_agent_userauth(Agent, pUserName, Identity);
+                end;
                 if ADebugMode then log('libssh2_agent_userauth. R: ' + IntToStr(R)); //@dbg
                 if R <> 0 then CacheLastSSHError(R);
                 if (R <> 0) and ADebugMode then log('Failed agent userauth: ' + sError); //@dbg
@@ -1220,8 +1532,12 @@ var
               end;
             end;
             if ADebugMode then log('libssh2_agent_disconnect:'); //@dbg
-            libssh2_agent_disconnect(Agent);
-            if ADebugMode then log('libssh2_agent_disconnect.'); //@dbg
+            R := libssh2_agent_disconnect(Agent);
+            while (R = LIBSSH2_ERROR_EAGAIN) do begin
+              waitsocket();
+              R := libssh2_agent_disconnect(Agent);
+            end;
+            if ADebugMode then log('libssh2_agent_disconnect. R: ' + IntToStr(R)); //@dbg
           end;
         finally
           if ADebugMode then log('libssh2_agent_free:'); //@dbg
@@ -1301,9 +1617,10 @@ var
   OK, AuthOK: Boolean;
   Prefs: AnsiString;
   HashMode: THashMode;
+  KeepAliveTimeOut, i: Integer;
 label
   L_AUTH_REPEAT;
-begin
+begin // procedure TSSH2Client.Connect
   if Connected then
     Exit;
   ADebugMode := fDebugMode;
@@ -1316,39 +1633,53 @@ begin
   if ADebugMode then log('CreateSocket.'); // @dbg
   if Sock = INVALID_SOCKET then
     Exit;
+
   if ADebugMode then log('ConnectSocket:'); // @dbg
   OK := ConnectSocket(Sock);
   if ADebugMode then log('ConnectSocket.'); // @dbg
   if not OK then
     RaiseSSHError(FLastErrStr);
   FSocket := Sock;
+
   if FSession <> nil then
   begin
     if ADebugMode then log('libssh2_session_free:'); // @dbg
-    libssh2_session_free(FSession);
+    R := libssh2_session_free(FSession);
+    while (R = LIBSSH2_ERROR_EAGAIN) do begin
+      waitsocket();
+      R := libssh2_session_free(FSession);
+    end;
     FSession := nil;
-    if ADebugMode then log('libssh2_session_free.'); // @dbg
+    if ADebugMode then log('libssh2_session_free. R: ' + IntToStr(R)); //@dbg
   end;
 
   Abstract.SelfPtr := Self;
   Abstract.Extra := nil;
   if ADebugMode then log('libssh2_session_init_ex:'); // @dbg
   FSession := libssh2_session_init_ex(nil, nil, nil, @Abstract);
-  if ADebugMode then log('libssh2_session_init_ex.'); // @dbg
+  while (FSession = nil) and (libssh2_session_last_errno(FSession) = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    Abstract.SelfPtr := Self;
+    Abstract.Extra := nil;
+    FSession := libssh2_session_init_ex(nil, nil, nil, @Abstract);
+  end;
+  if ADebugMode then log('libssh2_session_init_ex. R:'+BoolToStr(FSession<>nil, True)); //@dbg
   if FSession = nil then
     RaiseSSHError;
 
   {+} // https://www.libssh2.org/examples/sftp.html
   // Since we have set non-blocking, tell libssh2 we are blocking
-  //if ADebugMode then log('libssh2_session_set_blocking:'); //@dbg
-  //???libssh2_session_set_blocking(FSession, 1);
-  //if ADebugMode then log('libssh2_session_set_blocking.'); //@dbg
+  //SetBlockingMode(FBlockingMode); // ERROR: when FBlockingMode==True: "Failed getting banner"
 
   // ... start it up. This will trade welcome banners, exchange keys,
   // and setup crypto, compression, and MAC layers
   //if ADebugMode then log('libssh2_session_handshake:'); //@dbg
   //???R := libssh2_session_handshake(FSession, FSocket);
-  //if ADebugMode then log('libssh2_session_handshake.'); //@dbg
+  //while (R = LIBSSH2_ERROR_EAGAIN) do begin
+  //  waitsocket();
+  //  R := libssh2_session_handshake(FSession, FSocket);
+  //end;
+  //if ADebugMode then log('libssh2_session_handshake. R: ' + IntToStr(R)); //@dbg
   //if R <> 0 then
   //begin
   //  Disconnect;
@@ -1357,27 +1688,43 @@ begin
   {+.}
 
   if ADebugMode then log('libssh2_banner_set:'); // @dbg
-  libssh2_banner_set(FSession, PAnsiChar(MyEncode(FClientBanner)));
-  if ADebugMode then log('libssh2_banner_set.'); // @dbg
+  R := libssh2_banner_set(FSession, PAnsiChar(MyEncode(FClientBanner)));
+  while (R = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    R := libssh2_banner_set(FSession, PAnsiChar(MyEncode(FClientBanner)));
+  end;
+  if ADebugMode then log('libssh2_banner_set. R: ' + IntToStr(R)); //@dbg
 
   if FCompression then
   begin
     if ADebugMode then log('libssh2_session_flag: LIBSSH2_FLAG_COMPRESS'); // @dbg
-    libssh2_session_flag(FSession, LIBSSH2_FLAG_COMPRESS, 1);
-    if ADebugMode then log('libssh2_session_flag.'); // @dbg
+    R := libssh2_session_flag(FSession, LIBSSH2_FLAG_COMPRESS, 1);
+    while (R = LIBSSH2_ERROR_EAGAIN) do begin
+      waitsocket();
+      R := libssh2_session_flag(FSession, LIBSSH2_FLAG_COMPRESS, 1);
+    end;
+    if ADebugMode then log('libssh2_session_flag. R: ' + IntToStr(R)); //@dbg
 
     Prefs := 'zlib,none';
 
     if ADebugMode then log('libssh2_session_method_pref: COMP_CS'); // @dbg
     R := libssh2_session_method_pref(FSession, LIBSSH2_METHOD_COMP_CS, PAnsiChar(AnsiString(Prefs)));
-    if ADebugMode then log('libssh2_session_method_pref.'); // @dbg
+    while (R = LIBSSH2_ERROR_EAGAIN) do begin
+      waitsocket();
+      R := libssh2_session_method_pref(FSession, LIBSSH2_METHOD_COMP_CS, PAnsiChar(AnsiString(Prefs)));
+    end;
+    if ADebugMode then log('libssh2_session_method_pref. R: ' + IntToStr(R)); //@dbg
     if R <> 0 then CacheLastSSHError(R);
     if R <> 0 then
       if ADebugMode then log('Error setting comp_cs: ' + sError);
 
     if ADebugMode then log('libssh2_session_method_pref: COMP_SC'); // @dbg
     R := libssh2_session_method_pref(FSession, LIBSSH2_METHOD_COMP_SC, PAnsiChar(AnsiString(Prefs)));
-    if ADebugMode then log('libssh2_session_method_pref.'); // @dbg
+    while (R = LIBSSH2_ERROR_EAGAIN) do begin
+      waitsocket();
+      R := libssh2_session_method_pref(FSession, LIBSSH2_METHOD_COMP_SC, PAnsiChar(AnsiString(Prefs)));
+    end;
+    if ADebugMode then log('libssh2_session_method_pref. R: ' + IntToStr(R)); //@dbg
     if R <> 0 then CacheLastSSHError(R);
     if (R <> 0) and ADebugMode then log('Error setting comp_sc: ' + sError);
   end;
@@ -1388,7 +1735,11 @@ begin
   try
     if ADebugMode then log('libssh2_session_handshake:'); // @dbg
     R := libssh2_session_handshake(FSession, FSocket);
-    if ADebugMode then log('libssh2_session_handshake.'); // @dbg
+    while (R = LIBSSH2_ERROR_EAGAIN) do begin
+      waitsocket();
+      R := libssh2_session_handshake(FSession, FSocket);
+    end;
+    if ADebugMode then log('libssh2_session_handshake. R: ' + IntToStr(R)); //@dbg
     OK := True;
   except
   end;
@@ -1396,7 +1747,11 @@ begin
   begin
     if ADebugMode then log('libssh2_session_startup:'); // @dbg
     R := libssh2_session_startup(FSession, FSocket);
-    if ADebugMode then log('libssh2_session_startup.'); // @dbg
+    while (R = LIBSSH2_ERROR_EAGAIN) do begin
+      waitsocket();
+      R := libssh2_session_startup(FSession, FSocket);
+    end;
+    if ADebugMode then log('libssh2_session_startup. R: ' + IntToStr(R)); //@dbg
   end;
   if R = 0 then
   begin
@@ -1452,27 +1807,46 @@ begin
       end;
     end;
 
-    if ADebugMode then log('libssh2_session_set_blocking:'); //@dbg
-    libssh2_session_set_blocking(FSession, 1);
-    if ADebugMode then log('libssh2_session_set_blocking.'); //@dbg
+    SetBlockingMode(FBlockingMode);
 
-    if (FTimeOut > 0) and (FTimeOut<10) then FTimeOut := 10;
-    if FKeepAlive then
+    // Connection timeout
+    (* // ERROR: Could not get user auth list. // ERROR for DevAr.Demo.SSH.Server => moved lower!
+    KeepAliveTimeOut := FTimeOut;
+    if (KeepAliveTimeOut > 0) and (KeepAliveTimeOut<10) then
+      KeepAliveTimeOut := 10
+    else if KeepAliveTimeOut > 3*60 then
+      KeepAliveTimeOut := 3*60;
+    //?if FKeepAlive then
     begin
-      if ADebugMode then log('libssh2_keepalive_config: seconds: ' + IntToStr(FTimeOut)); // @dbg
-      libssh2_keepalive_config(FSession, Integer(FKeepAlive), FTimeOut); // FTimeOut - number of seconds
-      if ADebugMode then log('libssh2_keepalive_config.'); // @dbg
-    end;
+      //if ADebugMode then log('libssh2_keepalive_config: active: '+IntToStrBoolToStr(FKeepAlive, True)+'; seconds: ' + IntToStr(KeepAliveTimeOut)); // @dbg
+      //libssh2_keepalive_config(FSession, bool2int(FKeepAlive), KeepAliveTimeOut); // FTimeOut - number of seconds
+      if ADebugMode then log('libssh2_keepalive_config: active: 0; seconds: ' + IntToStr(KeepAliveTimeOut)); // @dbg
+      libssh2_keepalive_config(FSession, {KeepAlive:}0, KeepAliveTimeOut); // FTimeOut - number of seconds
+      // check/read keepalive timeout settings:
+      i := 0;
+      R := libssh2_keepalive_send(FSession, {seconds_to_next:}i);
+      while (R = LIBSSH2_ERROR_EAGAIN) do begin
+        waitsocket();
+        R := libssh2_keepalive_send(FSession, {seconds_to_next:}i);
+      end;
+      if R < 0 then ;
+      if ADebugMode then log('libssh2_keepalive_config. OK: '+BoolToStr(i = KeepAliveTimeOut, True)); // @dbg
+    end;//*)
 
     if ADebugMode then log('libssh2_userauth_list:'); // @dbg
     UserAuthList := libssh2_userauth_list(FSession, PAnsiChar(AnsiString(FUserName)),
       Length(AnsiString(FUserName)));
-    if ADebugMode then log('libssh2_userauth_list.'); // @dbg
+    while (UserAuthList = nil) and (libssh2_session_last_errno(FSession) = LIBSSH2_ERROR_EAGAIN) do begin
+      waitsocket();
+      UserAuthList := libssh2_userauth_list(FSession, PAnsiChar(AnsiString(FUserName)),
+        Length(AnsiString(FUserName)));
+    end;
+    if ADebugMode then log('libssh2_userauth_list. R: ' + IntToStr(R)); //@dbg
 
     // added supports authentication method NONE: https://www.libssh2.org/libssh2_userauth_list.html
     if ADebugMode then log('libssh2_userauth_authenticated:'); // @dbg
     OK := libssh2_userauth_authenticated(FSession) > 0;
-    if ADebugMode then log('libssh2_userauth_authenticated.'); // @dbg
+    if ADebugMode then log('libssh2_userauth_authenticated. R: '+BoolToStr(OK, True)); // @dbg
     if not OK then
     begin // when not auth NONE
       OK := Assigned(UserAuthList);
@@ -1514,7 +1888,7 @@ begin
       begin
         if ADebugMode then log('UserAuthTryAll:'); // @dbg
         AuthOK := UserAuthTryAll();
-        if ADebugMode then log('UserAuthTryAll.'); // @dbg
+        if ADebugMode then log('UserAuthTryAll. R: '+BoolToStr(AuthOK, True)); // @dbg
       end
       else
       begin
@@ -1523,7 +1897,7 @@ begin
         begin
           if ADebugMode then log('UserAuthPKey:'); // @dbg
           AuthOK := UserAuthPKey();
-          if ADebugMode then log('UserAuthPKey.'); // @dbg
+          if ADebugMode then log('UserAuthPKey. R: '+BoolToStr(AuthOK, True)); // @dbg
         end;
 
         if (not AuthOK) and (amPassword in AuthMode)
@@ -1531,21 +1905,21 @@ begin
         begin
           if ADebugMode then log('UserAuthPassword:'); // @dbg
           AuthOK := UserAuthPassword();
-          if ADebugMode then log('UserAuthPassword.'); // @dbg
+          if ADebugMode then log('UserAuthPassword. R: '+BoolToStr(AuthOK, True)); // @dbg
         end;
 
         if not AuthOK and (amKeyboardInteractive in AuthMode) then
         begin
           if ADebugMode then log('UserAuthKeyboardInteractive:'); // @dbg
           AuthOK := UserAuthKeyboardInteractive();
-          if ADebugMode then log('UserAuthKeyboardInteractive.'); // @dbg
+          if ADebugMode then log('UserAuthKeyboardInteractive. R: '+BoolToStr(AuthOK, True)); // @dbg
         end;
 
         if not AuthOK and (amPublicKeyViaAgent in AuthMode) then
         begin
           if ADebugMode then log('UserAuthPKeyViaAgent:'); // @dbg
           AuthOK := UserAuthPKeyViaAgent();
-          if ADebugMode then log('UserAuthPKeyViaAgent.'); // @dbg
+          if ADebugMode then log('UserAuthPKeyViaAgent. R: '+BoolToStr(AuthOK, True)); // @dbg
         end;
       end;
 
@@ -1555,7 +1929,11 @@ begin
       begin
         if ADebugMode then log('libssh2_userauth_authenticated:'); // @dbg
         R := libssh2_userauth_authenticated(FSession);
-        if ADebugMode then log('libssh2_userauth_authenticated.'); // @dbg
+        while (R = LIBSSH2_ERROR_EAGAIN) do begin
+          waitsocket();
+          R := libssh2_userauth_authenticated(FSession);
+        end;
+        if ADebugMode then log('libssh2_userauth_authenticated. R: ' + IntToStr(R)); //@dbg
         OK := R > 0;
         if (not OK) and ADebugMode then log('AuthFailed: ' + IntToStr(R)); //@dbg
       end;
@@ -1566,7 +1944,7 @@ begin
         begin
           if ADebugMode then log('OnAuthFailed:'); // @dbg
           FOnAuthFail(Self, OK);
-          if ADebugMode then log('OnAuthFailed.'); // @dbg
+          if ADebugMode then log('OnAuthFailed. OK: '+BoolToStr(OK, True)); // @dbg
         end;
         if not OK then
         begin
@@ -1595,6 +1973,27 @@ begin
 
     if ADebugMode then log('Try Connected!'); // @dbg
     FConnected := True;
+
+    // send timeout
+    KeepAliveTimeOut := FTimeOut;
+    if (KeepAliveTimeOut > 0) and (KeepAliveTimeOut<10) then
+      KeepAliveTimeOut := 10;
+    //if FKeepAlive then
+    begin
+      if ADebugMode then log('libssh2_keepalive_config: active: '+BoolToStr(FKeepAlive, True)+'; seconds: ' + IntToStr(KeepAliveTimeOut)); // @dbg
+      libssh2_keepalive_config(FSession, bool2int(FKeepAlive), KeepAliveTimeOut); // FTimeOut - number of seconds
+      if ADebugMode then log('libssh2_keepalive_config.'); // @dbg
+      // check/read keepalive timeout settings:
+      i := 0;
+      if ADebugMode then log('libssh2_keepalive_send:'); // @dbg
+      R := libssh2_keepalive_send(FSession, {seconds_to_next:}i);
+      while (R = LIBSSH2_ERROR_EAGAIN) do begin
+        waitsocket();
+        R := libssh2_keepalive_send(FSession, {seconds_to_next:}i);
+      end;
+      if ADebugMode then log('libssh2_keepalive_send. OK: '+BoolToStr(i = KeepAliveTimeOut, True)+'; R: ' + IntToStr(R)); //@dbg
+    end;
+
     if Assigned(FOnConnect) then
     begin
       if ADebugMode then log('OnConnect:'); // @dbg
@@ -1609,7 +2008,7 @@ begin
   end;
 
   if ADebugMode then log('Done!'); // @dbg
-end;
+end; // procedure TSSH2Client.Connect
 
 function TSSH2Client.ConnectSocket(var S: Integer): Boolean;
 type
@@ -1639,8 +2038,8 @@ type
         break;
       P := P^.ai_next;
     end;
-    if PData.ConnectRes = -1 then
-      WSACleanup;
+    //--if PData.ConnectRes = -1 then
+    //--  WSACleanup;
     PData.HaveRes := True;
   end;
 
@@ -1650,7 +2049,7 @@ var
   Hints: addrinfo;
   IpFamily: Integer;
   E: TMethod;
-begin
+begin // function TSSH2Client.ConnectSocket
   Result := False;
   if S <> INVALID_SOCKET then
   begin
@@ -1684,7 +2083,7 @@ begin
       Worker.Start;
       while not(Data.HaveRes or FCanceled or Application.Terminated) do
       begin
-        ProcessMsgs;
+        //--ProcessMsgs; //??
         Sleep(1);
       end;
       Worker.Stop;
@@ -1702,45 +2101,90 @@ begin
     if not FCanceled then
       Result := Data.ConnectRes <> -1;
   end;
+end; // function TSSH2Client.ConnectSocket
+
+function TSSH2Client.waitsocket(timeout_tv_sec: Longint): Integer;
+var socket_fd: Integer;
+  rc, dir: Integer; fd: {Winsock2.}TFdSet; writefd, readfd: {Winsock2.}PFdSet; timeout: {Winsock2.}TTimeVal;
+begin
+  {  if FBlockingMode then begin
+    Result := 0;
+    Exit;
+  end;//}
+
+  if FDebugMode then dbg('waitsocket('+IntToStr(timeout_tv_sec)+'):');
+  socket_fd := FSocket;
+
+  timeout.tv_sec := 10; timeout.tv_usec := 0;
+  FD_ZERO(fd);
+  FD_SET(socket_fd, fd); // or: Winsock2._FD_SET(socket_fd, fd);
+
+  // now make sure we wait in the correct direction
+  dir := libssh2_session_block_directions(FSession);
+
+  if (dir and LIBSSH2_SESSION_BLOCK_INBOUND) <> 0
+  then readfd := @fd
+  else readfd := nil;
+
+  if(dir and LIBSSH2_SESSION_BLOCK_OUTBOUND) <> 0
+  then writefd := @fd
+  else writefd := nil;
+
+  rc := {Winsock2.}select(socket_fd + 1, readfd, writefd, nil, @timeout);
+  Result := rc;
+
+  if FDebugMode then begin
+    if (rc = SOCKET_ERROR{-1}) then
+      dbg('waitsocket. ERROR: ' + SysErrorMessage(WSAGetLastError))
+    else
+      dbg('waitsocket. R: '+IntToStr(Result));
+  end;
 end;
 
 constructor TSSH2Client.Create(AOwner: TComponent);
+var
+  R, flags: Integer;
 begin
   inherited;
   {$IFDEF DEUBUG}     //@dbg
   FDebugMode := True; //@dbg
   {$ENDIF}            //@dbg
-  FHost := '';
+  //FHost := '';
   FPort := 22;
-  FUserName := '';
-  FPassword := '';
+  //FUserName := '';
+  //FPassword := '';
   FIPVersion := IPvUNSPEC;
   FAuthModes := [amTryAll];
   FClientBanner := LIBSSH2_SSH_BANNER;
-  FConnected := False;
-  FCanceled := False;
-  FKeepAlive := False;
+  //FConnected := False;
+  //FCanceled := False;
+  FBlockingMode := True;
+  //FKeepAlive := False;
   FTimeOut := 10;
   FSockBufLen := 8 * 1024;
   FSocket := INVALID_SOCKET;
   FCodePage := CP_UTF8;
-  FCompression := False;
+  //FCompression := False;
   if InterlockedIncrement(GSSH2Init) = 1 then
-    if libssh2_init(0) <> 0 then
+  begin
+    flags := 0; // or LIBSSH2_INIT_NO_CRYPTO
+    if FDebugMode then dbg('libssh2_init:');
+    R := libssh2_init(flags);
+    if FDebugMode then dbg('libssh2_init. R:'+IntToStr(R));
+    if R <> 0 then
       RaiseSSHError('Error initializing libssh2.');
+  end;
 end;
 
 function TSSH2Client.CreateSocket: Integer;
-var
-  WSData: TWSAData;
 begin
   Result := INVALID_SOCKET;
-  if WSAStartup(MakeWord(2, 2), WSData) <> 0 then
+  if WSDataStartup() <> 0 then
   begin
     RaiseSSHError('Invalid winsock version!');
     Exit;
   end;
-  Result := socket(Ord(FIPVersion), SOCK_STREAM, IPPROTO_TCP);
+  Result := WinSock.socket(Ord(FIPVersion), SOCK_STREAM, IPPROTO_TCP);
   if Result = INVALID_SOCKET then
   begin
     RaiseSSHError(SysErrorMessage(WSAGetLastError));
@@ -1754,36 +2198,66 @@ end;
 
 destructor TSSH2Client.Destroy;
 begin
-  if Connected then
+  if FConnected then
     Disconnect;
   if InterlockedDecrement(GSSH2Init) < 1 then
-    libssh2_exit;
+  begin
+    if FDebugMode then dbg('libssh2_exit:');
+    libssh2_exit();
+    if FDebugMode then dbg('libssh2_exit.');
+  end;
   inherited;
 end;
 
 procedure TSSH2Client.Disconnect;
+var
+  R, ASocket: Integer;
 begin
   try
     if FSession <> nil then
     begin
       try
-        libssh2_session_disconnect(FSession,
+        if FDebugMode then dbg('libssh2_session_disconnect:');
+        R := libssh2_session_disconnect(FSession,
           PAnsiChar(AnsiString(FClientBanner + ': ' + GetVersion + ' going to shutdown. Bye.')));
+        while (R = LIBSSH2_ERROR_EAGAIN) do begin
+          waitsocket();
+          R := libssh2_session_disconnect(FSession,
+            PAnsiChar(AnsiString(FClientBanner + ': ' + GetVersion + ' going to shutdown. Bye.')));
+        end;
+      if FDebugMode then dbg('libssh2_session_disconnect. R:'+IntToStr(R));
       finally
-        libssh2_session_free(FSession);
+        if FDebugMode then dbg('libssh2_session_free:');
+        R := libssh2_session_free(FSession);
+        while (R = LIBSSH2_ERROR_EAGAIN) do begin
+          waitsocket();
+          R := libssh2_session_free(FSession);
+        end;
+        if FDebugMode then dbg('libssh2_session_free. R:'+IntToStr(R));
       end;
     end;
   finally
-    closesocket(FSocket);
-    FSocket := INVALID_SOCKET;
     FSession := nil;
-    WSACleanup;
     FConnected := False;
+    //try
+    begin
+      if FSocket <> INVALID_SOCKET then
+      begin
+        ASocket := FSocket;
+        FSocket := INVALID_SOCKET;
+        if FDebugMode then dbg('closesocket:');
+        closesocket(ASocket);
+        if FDebugMode then dbg('closesocket.');
+      end;
+    //--finally
+    //--  //if FDebugMode then dbg('WSACleanup:');
+    //--  WSACleanup();
+    //--  //if FDebugMode then dbg('WSACleanup.');
+    end;
   end;
 end;
 
-procedure TSSH2Client.DoOnFingerprint(const AState: TFingerprintState;
-  var AAction: TConnectHashAction);
+procedure TSSH2Client.DoOnFingerprint(const AState: TFingerprintState; var AAction: TConnectHashAction);
 begin
   if Assigned(FOnFingerprint) then
     FOnFingerprint(Self, AState, AAction);
@@ -1803,7 +2277,7 @@ end;
 
 function TSSH2Client.GetLastSSHError(E: Integer): string;
 var
-  I: Integer;
+  I, R: Integer;
   P: PAnsiChar;
 begin
   if E = 0 then
@@ -1813,25 +2287,40 @@ begin
   I := 0;
   P := PAnsiChar(AnsiString(Result));
   if FSession <> nil then
-    libssh2_session_last_error(FSession, P, I, 0);
-  Result := string(P);
+  begin
+    //if FDebugMode then dbg('libssh2_session_last_error:');
+    R := libssh2_session_last_error(FSession, P, I, 0);
+    if R <> E then ;
+    //if FDebugMode then dbg('libssh2_session_last_error. R:'+IntToStr(R));
+    Result := string(P); // ?MyDecode(P)
+    if Result <> '' then
+      FLastErrStr := Result;
+  end;
 end;
 
 function TSSH2Client.GetLibString: string;
 begin
-  Result := string(libssh2_version(0));
+  //if FDebugMode then dbg('libssh2_version:');
+  Result := string(AnsiString(libssh2_version(0)));
+  //if FDebugMode then dbg('libssh2_version. R:'+Result);
 end;
 
 function TSSH2Client.GetSessionMethodsStr: string;
 begin
   Result := '';
   if FSession <> nil then
-    Result := Format('KEX: %s, CRYPT: %s, MAC: %s, COMP: %s, LANG: %s',
-      [libssh2_session_methods(FSession, LIBSSH2_METHOD_KEX), libssh2_session_methods(FSession,
-        LIBSSH2_METHOD_CRYPT_CS), libssh2_session_methods(FSession, LIBSSH2_METHOD_MAC_CS),
-      libssh2_session_methods(FSession, LIBSSH2_METHOD_COMP_CS) + ' ' +
-      libssh2_session_methods(FSession, LIBSSH2_METHOD_COMP_SC),
-      libssh2_session_methods(FSession, LIBSSH2_METHOD_LANG_CS)]);
+  begin
+    //if FDebugMode then dbg('libssh2_session_methods:');
+    Result := Format('KEX: %s, CRYPT: %s, MAC: %s, COMP: %s, LANG: %s', [
+      string(AnsiString(libssh2_session_methods(FSession, LIBSSH2_METHOD_KEX))),
+      string(AnsiString(libssh2_session_methods(FSession, LIBSSH2_METHOD_CRYPT_CS))),
+      string(AnsiString(libssh2_session_methods(FSession, LIBSSH2_METHOD_MAC_CS))),
+      string(AnsiString(libssh2_session_methods(FSession, LIBSSH2_METHOD_COMP_CS))) + ' ' +
+      string(AnsiString(libssh2_session_methods(FSession, LIBSSH2_METHOD_COMP_SC))),
+      string(AnsiString(libssh2_session_methods(FSession, LIBSSH2_METHOD_LANG_CS)))
+    ]);
+    //if FDebugMode then dbg('libssh2_session_freelibssh2_session_methods. R:'+Result);
+  end;
 end;
 
 function TSSH2Client.GetSessionPtr: PLIBSSH2_SESSION;
@@ -1849,12 +2338,12 @@ begin
   Result := ClassName + ' v' + SFTPCLIENT_VERSION;
 end;
 
-function TSSH2Client.MyDecode(const S: AnsiString): WideString;
+function TSSH2Client.MyDecode(const S: AnsiString): UnicodeString;
 begin
   Result := DecodeStr(S, FCodePage);
 end;
 
-function TSSH2Client.MyEncode(const WS: WideString): AnsiString;
+function TSSH2Client.MyEncode(const WS: UnicodeString): AnsiString;
 begin
   Result := EncodeStr(WS, FCodePage);
 end;
@@ -1901,26 +2390,127 @@ begin
   end;
 end;
 
+procedure TSSH2Client.SetBlockingMode(Value: Boolean);
+var
+   v, c: Integer;
+begin
+  if (FBlockingMode <> Value) or (Assigned(FSession) and not fConnected) then
+  begin
+    FBlockingMode := Value;
+    if Assigned(FSession) then
+    begin
+      if FDebugMode then dbg('libssh2_*blocking*:');
+      if Value then v := {non-blocking:}1 else {blocking:}v := 0;
+      c := libssh2_session_get_blocking(FSession);
+      if c <> v then
+      begin
+        if FDebugMode then dbg(strwhen('connect: ', not fConnected)+'libssh2_session_set_blocking('+IntToStr(v)+'):');
+        libssh2_session_set_blocking(FSession, v);
+        if FDebugMode then dbg(strwhen('connect: ', not fConnected)+'libssh2_session_set_blocking.');
+        // check real value:
+        c := libssh2_session_get_blocking(FSession);
+        if c <> v then
+        begin
+          FBlockingMode := c = 0;
+          if FDebugMode then dbg(strwhen('connect: ', not fConnected)+'warning: failed call libssh2_session_set_blocking.');
+        end;
+      end;
+      if FDebugMode then dbg('libssh2_*blocking*.');
+      if FDebugMode then dbg(strwhen('connect: ', not fConnected)+'blocking mode: '+IntToStr(c));
+    end;
+  end;
+end;
+
+procedure TSSH2Client.SetKeepAlive(Value: Boolean);
+var
+  KeepAliveTimeOut, R, i: Integer;
+begin
+  if (FKeepAlive <> Value) or (Assigned(FSession) and not fConnected) then
+  begin
+    FKeepAlive := Value;
+    //
+    if Assigned(FSession) then
+    begin
+      // send timeout
+      KeepAliveTimeOut := FTimeOut;
+      if (KeepAliveTimeOut > 0) and (KeepAliveTimeOut<10) then KeepAliveTimeOut := 10;
+      if fDebugMode then dbg(strwhen('connect: ', fConnected)+'libssh2_keepalive_config: active: '+BoolToStr(FKeepAlive, True)+'; seconds: ' + IntToStr(KeepAliveTimeOut));
+      libssh2_keepalive_config(FSession, bool2int(FKeepAlive), KeepAliveTimeOut); // FTimeOut - number of seconds
+      // check/read keepalive timeout settings:
+      i := 0;
+      R := libssh2_keepalive_send(FSession, {seconds_to_next:}i);
+      while (R = LIBSSH2_ERROR_EAGAIN) do begin
+        waitsocket();
+        R := libssh2_keepalive_send(FSession, {seconds_to_next:}i);
+      end;
+      //if R < 0 then ;
+      if fDebugMode then dbg(strwhen('connect: ', fConnected)+'libssh2_keepalive_config. OK: '+BoolToStr(i = KeepAliveTimeOut, True));
+    end;
+  end;
+end;
+
+procedure TSSH2Client.SetTimeOut(Value: Integer);
+var
+  KeepAliveTimeOut, R, i: Integer;
+begin
+  if Value < 0 then Value := 0;
+  if (FTimeOut <> Value) or (Assigned(FSession) and not fConnected) then
+  begin
+    FTimeOut := Value;
+    //
+    if Assigned(FSession) then
+    begin
+      // send timeout
+      KeepAliveTimeOut := FTimeOut;
+      if (KeepAliveTimeOut > 0) and (KeepAliveTimeOut<10) then KeepAliveTimeOut := 10;
+      if fDebugMode then dbg(strwhen('connect: ', fConnected)+'libssh2_keepalive_config: active: '+BoolToStr(FKeepAlive, True)+'; seconds: ' + IntToStr(KeepAliveTimeOut));
+      libssh2_keepalive_config(FSession, bool2int(FKeepAlive), KeepAliveTimeOut); // FTimeOut - number of seconds
+      // check/read keepalive timeout settings:
+      i := 0;
+      R := libssh2_keepalive_send(FSession, {seconds_to_next:}i);
+      while (R = LIBSSH2_ERROR_EAGAIN) do begin
+        waitsocket();
+        R := libssh2_keepalive_send(FSession, {seconds_to_next:}i);
+      end;
+      //if R < 0 then ;
+      if fDebugMode then dbg(strwhen('connect: ', fConnected)+'libssh2_keepalive_config. OK: '+BoolToStr(i = KeepAliveTimeOut, True));
+    end;
+  end;
+end;
+
 { TSFTPClient }
 
 procedure TSFTPClient.Cancel(ADisconnect: Boolean);
 begin
-  //
   FCanceled := True;
   inherited;
 end;
 
 function TSFTPClient.ChangeDir(const APath: WideString): Boolean;
 var
-  DirHandle: PLIBSSH2_SFTP_HANDLE;
+  DirHandle: PLIBSSH2_SFTP_HANDLE; R{, C}: Integer;
 begin
   Result := False;
   if FSFtp <> nil then
   begin
+    if FDebugMode then dbg('libssh2_sftp_opendir:');
     DirHandle := libssh2_sftp_opendir(FSFtp, PAnsiChar(MyEncode(APath)));
-    if DirHandle <> nil then
+    while (DirHandle = nil) and (libssh2_session_last_errno(FSession) = LIBSSH2_ERROR_EAGAIN) do begin
+      waitsocket();
+      DirHandle := libssh2_sftp_opendir(FSFtp, PAnsiChar(MyEncode(APath)));
+    end;
+    if FDebugMode then dbg('libssh2_sftp_opendir. R:'+BoolToStr(DirHandle<>nil, True));
+    if Assigned(DirHandle) then
     begin
-      libssh2_sftp_closedir(DirHandle);
+      if FDebugMode then dbg('libssh2_sftp_closedir:');
+      R := libssh2_sftp_closedir(DirHandle);
+      //C := 100;
+      while (R = LIBSSH2_ERROR_EAGAIN) {and (C > 0)} do begin
+        //Dec(C);
+        waitsocket();
+        R := libssh2_sftp_closedir(DirHandle);
+      end;
+      if FDebugMode then dbg('libssh2_sftp_closedir. R:'+IntToStr(R));
       Result := True;
     end;
   end;
@@ -1954,14 +2544,23 @@ begin
   inherited Connect;
   if not Connected then
     Exit;
+  if FDebugMode then dbg('libssh2_sftp_init:');
   FSFtp := libssh2_sftp_init(GetSessionPtr);
+  while (FSFtp = nil) and (libssh2_session_last_errno(FSession) = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    FSFtp := libssh2_sftp_init(GetSessionPtr);
+  end;
+  if FDebugMode then dbg('+IntToStr(R). R:'+BoolToStr(FSFtp<>nil, True));
   if FSFtp = nil then
   begin
-    Disconnect;
-    RaiseSSHError;
+    try
+      RaiseSSHError;
+    finally
+      Disconnect;
+    end;
   end;
 
-  Dir := ExpandCurrentDirPath;
+  Dir := ExpandCurrentDirPath();
   if Dir = '' then
   begin
     B := True;
@@ -2008,138 +2607,432 @@ begin
   FWriteBufLen := 32 * 1024 - 1;
 end;
 
-procedure TSFTPClient.DeleteDir(const ADirName: WideString);
+procedure TSFTPClient.Delete(const AName: WideString);
+var
+  R: Integer; rawName: AnsiString; Attribs: LIBSSH2_SFTP_ATTRIBUTES;
 begin
   FCanceled := False;
-  if libssh2_sftp_rmdir(FSFtp, PAnsiChar(MyEncode(ADirName))) <> 0 then
+  rawName := MyEncode(AName);
+  if FDebugMode then dbg('libssh2_sftp_stat:');
+  R := libssh2_sftp_stat(FSFtp, PAnsiChar(rawName), Attribs);
+  while (R = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    R := libssh2_sftp_stat(FSFtp, PAnsiChar(rawName), Attribs);
+  end;
+  if FDebugMode then dbg('libssh2_sftp_stat. R:'+IntToStr(R));
+  if R <> 0 then // not exists
+  begin
+    //--RaiseSSHError;
+    Exit;
+  end;
+  if TestBit(Attribs.Flags, LIBSSH2_SFTP_ATTR_PERMISSIONS)
+    and( Attribs.Permissions and LIBSSH2_SFTP_S_IFMT = LIBSSH2_SFTP_S_IFDIR ) then
+  begin
+    if FDebugMode then dbg('libssh2_sftp_rmdir:');
+    R := libssh2_sftp_rmdir(FSFtp, PAnsiChar(rawName));
+    while (R = LIBSSH2_ERROR_EAGAIN) do begin
+      waitsocket();
+      R := libssh2_sftp_rmdir(FSFtp, PAnsiChar(rawName));
+    end;
+    if FDebugMode then dbg('libssh2_sftp_rmdir. R:'+IntToStr(R));
+  end
+  else
+  begin // TODO: Check for SymLinkDir "LIBSSH2_SFTP_S_IFLNK"
+    if FDebugMode then dbg('libssh2_sftp_unlink:');
+    R := libssh2_sftp_unlink(FSFtp, PAnsiChar(rawName));
+    while (R = LIBSSH2_ERROR_EAGAIN) do begin
+      waitsocket();
+      R := libssh2_sftp_unlink(FSFtp, PAnsiChar(rawName));
+    end;
+    if FDebugMode then dbg('libssh2_sftp_unlink. R:'+IntToStr(R));
+  end;
+  if R <> 0 then
+    RaiseSSHError;
+end;
+
+procedure TSFTPClient.DeleteDir(const ADirName: WideString);
+var
+  R: Integer; rawDirName: AnsiString;
+begin
+  FCanceled := False;
+  rawDirName := MyEncode(ADirName);
+  // TODO: Check for SymLinkDir "LIBSSH2_SFTP_S_IFLNK"
+  if FDebugMode then dbg('libssh2_sftp_rmdir:');
+  R := libssh2_sftp_rmdir(FSFtp, PAnsiChar(rawDirName));
+  while (R = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    R := libssh2_sftp_rmdir(FSFtp, PAnsiChar(rawDirName));
+  end;
+  if FDebugMode then dbg('libssh2_sftp_rmdir. R:'+IntToStr(R));
+  if R <> 0 then
     RaiseSSHError;
 end;
 
 procedure TSFTPClient.DeleteFile(const AFileName: WideString);
+var
+  R: Integer; rawFileName: AnsiString;
 begin
   FCanceled := False;
-  if libssh2_sftp_unlink(FSFtp, PAnsiChar(MyEncode(AFileName))) <> 0 then
+  rawFileName := MyEncode(AFileName);
+  if FDebugMode then dbg('libssh2_sftp_unlink. R');
+  R := libssh2_sftp_unlink(FSFtp, PAnsiChar(rawFileName));
+  while (R = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    R := libssh2_sftp_unlink(FSFtp, PAnsiChar(rawFileName));
+  end;
+  if FDebugMode then dbg('libssh2_sftp_unlink. R:'+IntToStr(R));
+  if R <> 0 then
     RaiseSSHError;
 end;
 
 destructor TSFTPClient.Destroy;
 begin
-  FItems.Free;
+  FreeAndNil(FItems);
   if Connected then
     Disconnect;
   inherited;
 end;
 
 procedure TSFTPClient.Disconnect;
+var
+  ASFtp: PLIBSSH2_SFTP; R: Integer;
 begin
+  if Assigned(FSFtp) then
   try
-    if FSFtp <> nil then
-      libssh2_sftp_shutdown(FSFtp);
-    inherited;
-  finally
+    ASFtp := FSFtp;
     FSFtp := nil;
+    if FDebugMode then dbg('libssh2_sftp_shutdown:');
+    R := libssh2_sftp_shutdown(ASFtp);
+    while (R = LIBSSH2_ERROR_EAGAIN) do begin
+      waitsocket();
+      R := libssh2_sftp_shutdown(ASFtp);
+    end;
+    if FDebugMode then dbg('libssh2_sftp_shutdown. R:'+IntToStr(R));
+  except
   end;
+  inherited;
 end;
 
 function TSFTPClient.ExpandCurrentDirPath: WideString;
-const
-  BUF_LEN = 4 * 1024;
 var
   DirHandle: PLIBSSH2_SFTP_HANDLE;
-  Buf: PAnsiChar;
+  Buf: AnsiString;
+  R{, C}: Integer;
 begin
   Result := '';
-
+  if FDebugMode then dbg('libssh2_sftp_opendir:');
   DirHandle := libssh2_sftp_opendir(FSFtp, '.');
-  if DirHandle <> nil then
-  begin
-    GetMem(Buf, BUF_LEN);
-    try
-      libssh2_sftp_realpath(FSFtp, nil, Buf, BUF_LEN);
-      libssh2_sftp_close(DirHandle);
-      Result := MyDecode(Buf);
-    finally
-      FreeMem(Buf);
-    end;
-  end
-  else
+  while (DirHandle = nil) and (libssh2_session_last_errno(FSession) = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    DirHandle := libssh2_sftp_opendir(FSFtp, '.');
+  end;
+  if FDebugMode then dbg('libssh2_sftp_opendir. R:'+BoolToStr(DirHandle<>nil, True));
+  if DirHandle = nil then
     RaiseSSHError;
-end;
-
-{+}
-function TSFTPClient.Exists(const ASourceFileName: WideString): Boolean;
-var
-  Attribs: LIBSSH2_SFTP_ATTRIBUTES;
-  FHandle: PLIBSSH2_SFTP_HANDLE;
-begin
-  Result := False;
-  if libssh2_sftp_stat(FSFtp, PAnsiChar(MyEncode(ASourceFileName)), Attribs) = 0 then
-  begin
-    if not TestBit(Attribs.Flags, LIBSSH2_SFTP_ATTR_SIZE) then
-      dbgw('TSFTPClient::Get >> No size attrib:' + ASourceFileName);
-
-    FHandle := libssh2_sftp_open(FSFtp, PAnsiChar(MyEncode(ASourceFileName)), LIBSSH2_FXF_READ, 0);
-    if FHandle = nil then
-      Exit;
-    libssh2_sftp_close(FHandle);
-    Result := True;
+  try
+    SetLength(Buf, 4*1024);
+    if FDebugMode then dbg('libssh2_sftp_realpath:');
+    R := libssh2_sftp_realpath(FSFtp, nil, PAnsiChar(Buf), Length(Buf));
+    while (R = LIBSSH2_ERROR_EAGAIN) or (R = LIBSSH2_ERROR_BUFFER_TOO_SMALL) do begin
+      if (R = LIBSSH2_ERROR_BUFFER_TOO_SMALL) then
+      begin
+        if Length(Buf) > 16*1024 then
+          Break;
+        SetLength(Buf, 4*1024 + Length(Buf));
+      end
+      else
+        waitsocket();
+      R := libssh2_sftp_realpath(FSFtp, nil, PAnsiChar(Buf), Length(Buf));
+    end;
+    if FDebugMode then dbg('libssh2_sftp_realpath. R:'+IntToStr(R));
+    if R < 0 then
+      RaiseSSHError;
+    SetLength(Buf, R);
+    Result := MyDecode(Buf);
+  finally
+    if FDebugMode then dbg('libssh2_sftp_close:');
+    R := libssh2_sftp_close(DirHandle);
+    //C := 100;
+    while (R = LIBSSH2_ERROR_EAGAIN) {and (C > 0)} do begin
+      //Dec(C);
+      waitsocket();
+      R := libssh2_sftp_close(DirHandle);
+    end;
+    if FDebugMode then dbg('libssh2_sftp_close. R:'+IntToStr(R));
   end;
 end;
-{+.}
 
-procedure TSFTPClient.Get(const ASourceFileName: WideString; const ADest: TStream;
-  AResume: Boolean);
+function TSFTPClient.Exists(const ASourceFileName: WideString): Boolean;
+var
+  rawSourceFileName: AnsiString;
+  R{, C}: Integer;
+  Attribs: LIBSSH2_SFTP_ATTRIBUTES;
+  //FHandle: PLIBSSH2_SFTP_HANDLE;
+begin
+  Result := False;
+  rawSourceFileName := MyEncode(ASourceFileName);
+
+  if FDebugMode then dbg('libssh2_sftp_stat:');
+  R := libssh2_sftp_stat(FSFtp, PAnsiChar(rawSourceFileName), Attribs);
+  while (R = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    R := libssh2_sftp_stat(FSFtp, PAnsiChar(rawSourceFileName), Attribs);
+  end;
+  if FDebugMode then dbg('libssh2_sftp_stat. R:'+IntToStr(R));
+  if R <> 0 then // not exists
+  begin
+    //--RaiseSSHError;
+    Exit;
+  end;
+  Result := True;
+(* OLD:
+  Result := False;
+  rawSourceFileName := MyEncode(ASourceFileName);
+
+  R := libssh2_sftp_stat(FSFtp, PAnsiChar(rawSourceFileName), Attribs);
+  while (R = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    R := libssh2_sftp_stat(FSFtp, PAnsiChar(rawSourceFileName), Attribs);
+  end;
+  if R <> 0 then
+    Exit;
+
+  if FDebugMode and (not TestBit(Attribs.Flags, LIBSSH2_SFTP_ATTR_SIZE)) then
+    dbgw('TSFTPClient::Get >> No size attrib:' + ASourceFileName);
+
+  FHandle := libssh2_sftp_open(FSFtp, PAnsiChar(rawSourceFileName), LIBSSH2_FXF_READ, 0);
+  while (FHandle = nil) and (libssh2_session_last_errno(FSession) = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    FHandle := libssh2_sftp_open(FSFtp, PAnsiChar(rawSourceFileName), LIBSSH2_FXF_READ, 0);
+  end;
+  if FHandle = nil then
+    Exit;
+  Result := True;
+
+  R := libssh2_sftp_close(FHandle);
+  //C := 100;
+  while (R = LIBSSH2_ERROR_EAGAIN) {and (C > 0)} do begin
+    //Dec(C);
+    waitsocket();
+    R := libssh2_sftp_close(FHandle);
+  end;
+  //*)
+end;
+
+function TSFTPClient.ExistsFile(const ASourceFileName: WideString): Boolean;
+var
+  rawSourceFileName: AnsiString; sLinkPath: string;
+  R: Integer;
+  Attribs: LIBSSH2_SFTP_ATTRIBUTES;
+begin
+  Result := False;
+  if (ASourceFileName = '') or (ASourceFileName[Length(ASourceFileName)] = '/') then
+    Exit;
+  FillChar(Attribs, SizeOf(Attribs), 0);
+  rawSourceFileName := MyEncode(ASourceFileName);
+  R := libssh2_sftp_stat(FSFtp, PAnsiChar(rawSourceFileName), Attribs);
+  while (R = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    R := libssh2_sftp_stat(FSFtp, PAnsiChar(rawSourceFileName), Attribs);
+  end;
+  if R <> 0 then // not exists
+  begin
+    //--RaiseSSHError;
+    Exit;
+  end;
+  if not TestBit(Attribs.Flags, LIBSSH2_SFTP_ATTR_PERMISSIONS) then
+    Exit;
+  case Attribs.Permissions and LIBSSH2_SFTP_S_IFMT of
+    LIBSSH2_SFTP_S_IFDIR:
+      { dir: empty } ;
+    LIBSSH2_SFTP_S_IFLNK:
+      begin
+        FillChar(Attribs, SizeOf(Attribs), 0);
+        try
+          sLinkPath := ResolveSymLink(ASourceFileName, Attribs, True);
+          if TestBit(Attribs.Flags, LIBSSH2_SFTP_ATTR_PERMISSIONS) and
+            (Attribs.Permissions and LIBSSH2_SFTP_S_IFMT = LIBSSH2_SFTP_S_IFDIR) then
+          begin
+            { link dir : empty }
+          end
+          else
+          begin
+            { link file }
+            Result := True;
+          end;
+        except
+          on E: ESSH2Exception do
+          begin
+            { link file }
+            Result := True;
+          end;
+        end;
+      end;
+    else begin
+      { file }
+      Result := True;
+    end;
+  end; // case
+end;
+
+function TSFTPClient.ExistsDir(const ASourceFileName: WideString): Boolean;
+var
+  rawSourceFileName: AnsiString; sLinkPath: string;
+  R: Integer;
+  Attribs: LIBSSH2_SFTP_ATTRIBUTES;
+begin
+  Result := False;
+  rawSourceFileName := MyEncode(ASourceFileName);
+  if FDebugMode then dbg('libssh2_sftp_stat:');
+  R := libssh2_sftp_stat(FSFtp, PAnsiChar(rawSourceFileName), Attribs);
+  while (R = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    R := libssh2_sftp_stat(FSFtp, PAnsiChar(rawSourceFileName), Attribs);
+  end;
+  if FDebugMode then dbg('libssh2_sftp_stat. R:'+IntToStr(R));
+  if R <> 0 then // not exists
+  begin
+    //--RaiseSSHError;
+    Exit;
+  end;
+  if not TestBit(Attribs.Flags, LIBSSH2_SFTP_ATTR_PERMISSIONS) then
+    Exit;
+  case Attribs.Permissions and LIBSSH2_SFTP_S_IFMT of
+    LIBSSH2_SFTP_S_IFDIR:
+      { dir }
+      Result := True;
+    LIBSSH2_SFTP_S_IFLNK:
+      begin
+        FillChar(Attribs, SizeOf(Attribs), 0);
+        try
+          sLinkPath := ResolveSymLink(ASourceFileName, Attribs, True);
+          if TestBit(Attribs.Flags, LIBSSH2_SFTP_ATTR_PERMISSIONS) and
+            (Attribs.Permissions and LIBSSH2_SFTP_S_IFMT = LIBSSH2_SFTP_S_IFDIR) then
+          begin
+            { link dir }
+            Result := True;
+          end
+          else
+          begin
+            { link file: empty }
+          end;
+        except
+          on E: ESSH2Exception do
+          begin
+            { link file: empty }
+          end;
+        end;
+      end;
+    else begin
+      { file: empty }
+    end;
+  end; // case
+end;
+
+procedure TSFTPClient.Get(const ASourceFileName: WideString; const ADest: TStream; AResume: Boolean);
 var
   Attribs: LIBSSH2_SFTP_ATTRIBUTES;
   Transfered, Total: UInt64;
   FHandle: PLIBSSH2_SFTP_HANDLE;
   Buf: PAnsiChar;
-  R, N: Integer;
+  R, {C,} N: Integer;
+  rawSourceFileName: AnsiString;
 begin
-  //
   FCanceled := False;
-  if libssh2_sftp_stat(FSFtp, PAnsiChar(MyEncode(ASourceFileName)), Attribs) = 0 then
+
+  rawSourceFileName := MyEncode(ASourceFileName);
+  if FDebugMode then dbg('libssh2_sftp_stat:');
+  R := libssh2_sftp_stat(FSFtp, PAnsiChar(rawSourceFileName), Attribs);
+  while (R = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    R := libssh2_sftp_stat(FSFtp, PAnsiChar(rawSourceFileName), Attribs);
+  end;
+  if FDebugMode then dbg('libssh2_sftp_stat. R:'+IntToStr(R));
+  if R <> 0 then
+    RaiseSSHError;
+
+  if FDebugMode and (not TestBit(Attribs.Flags, LIBSSH2_SFTP_ATTR_SIZE)) then
+    dbgw('TSFTPClient::Get >> No size attrib:' + ASourceFileName);
+
+  if FDebugMode then dbg('libssh2_sftp_open:');
+  FHandle := libssh2_sftp_open(FSFtp, PAnsiChar(rawSourceFileName), LIBSSH2_FXF_READ, 0);
+  while (FHandle = nil) and (libssh2_session_last_errno(FSession) = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    FHandle := libssh2_sftp_open(FSFtp, PAnsiChar(rawSourceFileName), LIBSSH2_FXF_READ, 0);
+  end;
+  if FDebugMode then dbg('libssh2_sftp_open. R:'+BoolToStr(FHandle<>nil, True));
+  if FHandle = nil then
+    RaiseSSHError;
+
+  if AResume and Assigned(ADest) then
   begin
-    if not TestBit(Attribs.Flags, LIBSSH2_SFTP_ATTR_SIZE) then
-      dbgw('TSFTPClient::Get >> No size attrib:' + ASourceFileName);
-
-    FHandle := libssh2_sftp_open(FSFtp, PAnsiChar(MyEncode(ASourceFileName)), LIBSSH2_FXF_READ, 0);
-    if FHandle = nil then
-      RaiseSSHError;
-
-    if AResume then
-    begin
-      Total := UInt64(Attribs.FileSize) - UInt64(ADest.Position);
-      libssh2_sftp_seek64(FHandle, ADest.Position);
-    end
-    else
-      Total := Attribs.FileSize;
-
-    Transfered := 0;
-    GetMem(Buf, FReadBufLen);
-    try
-      repeat
-        R := libssh2_sftp_read(FHandle, Buf, FReadBufLen);
-        if R > 0 then
-        begin
-          N := ADest.Write(Buf^, R);
-          if N > 0 then
-          begin
-            Inc(Transfered, N);
-            if Assigned(FOnTProgress) then
-              FOnTProgress(Self, ASourceFileName, Transfered, Total);
-          end;
-        end
-        else if R < 0 then
-          RaiseSSHError;
-      until (R = 0) or FCanceled;
-    finally
-      FreeMem(Buf);
-      libssh2_sftp_close(FHandle);
-    end;
+    Total := UInt64(Attribs.FileSize) - UInt64(ADest.Position);
+    if FDebugMode then dbg('libssh2_sftp_seek64:');
+    libssh2_sftp_seek64(FHandle, ADest.Position);
+    if FDebugMode then dbg('libssh2_sftp_seek64.');
   end
   else
-    RaiseSSHError;
+    Total := Attribs.FileSize;
+
+  Transfered := 0;
+  GetMem(Buf, FReadBufLen);
+  try
+    repeat
+      if FDebugMode then dbg('libssh2_sftp_read:');
+      R := libssh2_sftp_read(FHandle, Buf, FReadBufLen);
+      while (R = LIBSSH2_ERROR_EAGAIN) do begin
+        waitsocket();
+        R := libssh2_sftp_read(FHandle, Buf, FReadBufLen);
+      end;
+      if FDebugMode then dbg('libssh2_sftp_read. R:'+IntToStr(R));
+      if R < 0 then
+        RaiseSSHError;
+      if R > 0 then
+      begin
+        if Assigned(ADest) then
+          N := ADest.Write(Buf^, R)
+        else
+          N := R;
+        if N > 0 then
+        begin
+          Inc(Transfered, N);
+          if Assigned(FOnTProgress) then
+            FOnTProgress(Self, ASourceFileName, Transfered, Total);
+        end;
+      end;
+    until (R = 0) or FCanceled;
+  finally
+    FreeMem(Buf);
+    if FDebugMode then dbg('libssh2_sftp_close:');
+    R := libssh2_sftp_close(FHandle);
+    //C := 100;
+    while (R = LIBSSH2_ERROR_EAGAIN) {and (C > 0)} do begin
+      //Dec(C);
+      waitsocket();
+      R := libssh2_sftp_close(FHandle);
+    end;
+    if FDebugMode then dbg('libssh2_sftp_close. R:'+IntToStr(R));
+  end;
+end;
+
+function TSFTPClient.GetAttributes(const APath: WideString; var AAtribs: LIBSSH2_SFTP_ATTRIBUTES): Boolean;
+var R: Integer; rawPath: AnsiString;
+begin
+  Result := False;
+  rawPath := MyEncode(APath);
+  FillChar(AAtribs, SizeOf(AAtribs), 0);
+  if FDebugMode then dbg('libssh2_sftp_stat:');
+  R := libssh2_sftp_stat(FSFtp, PAnsiChar(rawPath), AAtribs);
+  while (R = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    R := libssh2_sftp_stat(FSFtp, PAnsiChar(rawPath), AAtribs);
+  end;
+  if FDebugMode then dbg('libssh2_sftp_stat. R:'+IntToStr(R));
+  if R <> 0 then // not exists
+  begin
+    //RaiseSSHError;
+    Result := True;
+  end;
 end;
 
 function TSFTPClient.GetLastSSHError(E: Integer): string;
@@ -2153,7 +3046,9 @@ begin
     S := 'SFTP: ';
     if E = 0 then
     begin
+      //if FDebugMode then dbg('libssh2_sftp_last_error:');
       C := libssh2_sftp_last_error(FSFtp);
+      //if FDebugMode then dbg('libssh2_sftp_last_error. R:'+IntToStr(C));
       if C = 0 then
       begin
         Result := SysErrorMessage(WSAGetLastError);
@@ -2237,7 +3132,13 @@ begin
       else
         FCurrentDir := AStartPath;
 
+  if FDebugMode then dbg('libssh2_sftp_opendir:');
   DirHandle := libssh2_sftp_opendir(FSFtp, PAnsiChar(MyEncode(CurrentDirectory)));
+  while (DirHandle = nil) and (libssh2_session_last_errno(FSession) = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    DirHandle := libssh2_sftp_opendir(FSFtp, PAnsiChar(MyEncode(CurrentDirectory)));
+  end;
+  if FDebugMode then dbg('libssh2_sftp_opendir. R:'+BoolToStr(DirHandle<>nil, True));
   if DirHandle = nil then
     RaiseSSHError('Could not open dir: ' + GetLastSSHError);
 
@@ -2245,14 +3146,28 @@ begin
   FItems.BeginUpdate;
   try
     repeat
+     if FDebugMode then dbg('libssh2_sftp_readdir_ex:');
       R := libssh2_sftp_readdir_ex(DirHandle, EntryBuffer, BUF_LEN, LongEntry, BUF_LEN, @Attribs);
+      while (R = LIBSSH2_ERROR_EAGAIN) and (not FCanceled) do begin
+        waitsocket();
+        R := libssh2_sftp_readdir_ex(DirHandle, EntryBuffer, BUF_LEN, LongEntry, BUF_LEN, @Attribs);
+      end;
+      if FDebugMode then dbg('libssh2_sftp_readdir_ex. R:'+IntToStr(R));
       if (R <= 0) or FCanceled then
         break;
       FItems.ParseEntryBuffers(EntryBuffer, LongEntry, Attribs, FCodePage);
     until not True;
   finally
     FItems.EndUpdate;
-    libssh2_sftp_closedir(DirHandle);
+    if FDebugMode then dbg('libssh2_sftp_closedir:');
+    R := libssh2_sftp_closedir(DirHandle);
+    //C := 100;
+    while (R = LIBSSH2_ERROR_EAGAIN) {and (C > 0)} do begin
+      //Dec(C);
+      waitsocket();
+      R := libssh2_sftp_closedir(DirHandle);
+    end;
+    if FDebugMode then dbg('libssh2_sftp_closedir. R:'+IntToStr(R));
     FItems.Path := FCurrentDir;
   end;
 end;
@@ -2282,7 +3197,8 @@ procedure TSFTPClient.DoMakeDir(const LDir: WideString; AMode: Integer; ARecurse
 var // LDir - direcrory delimiter ( PathDelim ) ( windows '\' )
   SDir: WideString; // sub dir
   RDir: WideString; // direcrory delimiter '/' ( sftp )
-  Mode: Integer;
+  aRDir: AnsiString;
+  Mode, R: Integer;
 begin
   FCanceled := False;
   if (LDir = '') or (LDir = PathDelim) then
@@ -2313,21 +3229,39 @@ begin
     RDir := WideStringReplace(LDir, PathDelim, '/', [rfReplaceAll])
   else
     RDir := LDir;
-  if libssh2_sftp_mkdir(FSFtp, PAnsiChar(MyEncode(RDir)), Mode) <> 0 then
+
+  aRDir := MyEncode(RDir);
+  if FDebugMode then dbg('libssh2_sftp_mkdir:');
+  R := libssh2_sftp_mkdir(FSFtp, PAnsiChar(aRDir), Mode);
+  while (R = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    R := libssh2_sftp_mkdir(FSFtp, PAnsiChar(aRDir), Mode);
+  end;
+  if FDebugMode then dbg('libssh2_sftp_mkdir. R:'+IntToStr(R));
+  if R <> 0 then
     RaiseSSHError;
 end;
 
 procedure TSFTPClient.MakeSymLink(const AOrigin, ADest: WideString);
+var
+  R: Integer;
 begin
   FCanceled := False;
-  if libssh2_sftp_symlink(FSFtp, PAnsiChar(MyEncode(ADest)), PAnsiChar(MyEncode(AOrigin))) <> 0 then
+  if FDebugMode then dbg('libssh2_sftp_symlink:');
+  R := libssh2_sftp_symlink(FSFtp, PAnsiChar(MyEncode(ADest)), PAnsiChar(MyEncode(AOrigin)));
+  while (R = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    R := libssh2_sftp_symlink(FSFtp, PAnsiChar(MyEncode(ADest)), PAnsiChar(MyEncode(AOrigin)));
+  end;
+  if FDebugMode then dbg('libssh2_sftp_symlink. R:'+IntToStr(R));
+  if R <> 0 then
     RaiseSSHError;
 end;
 
 procedure TSFTPClient.Put(const ASource: TStream; const ADestFileName: WideString;
   AOverwrite: Boolean);
 var
-  R, N, K: Integer;
+  R, {C,} N, K: Integer;
   Mode: Integer;
   FHandle: PLIBSSH2_SFTP_HANDLE;
   Buf, StartBuf: PAnsiChar;
@@ -2340,9 +3274,17 @@ begin
   else
     Mode := Mode or LIBSSH2_FXF_EXCL; // ensure call fails if file exists
 
+  if FDebugMode then dbg('libssh2_sftp_open: "'+ADestFileName+'"');
   FHandle := libssh2_sftp_open(FSFtp, PAnsiChar(MyEncode(ADestFileName)), Mode,
     LIBSSH2_SFTP_S_IRUSR or LIBSSH2_SFTP_S_IWUSR or LIBSSH2_SFTP_S_IRGRP or
       LIBSSH2_SFTP_S_IROTH);
+  while (FHandle = nil) and (libssh2_session_last_errno(FSession) = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    FHandle := libssh2_sftp_open(FSFtp, PAnsiChar(MyEncode(ADestFileName)), Mode,
+      LIBSSH2_SFTP_S_IRUSR or LIBSSH2_SFTP_S_IWUSR or LIBSSH2_SFTP_S_IRGRP or
+        LIBSSH2_SFTP_S_IROTH);
+  end;
+  if FDebugMode then dbg('libssh2_sftp_open: R: "'+BoolToStr(FHandle <> nil, True)+'"');
   if FHandle = nil then
     RaiseSSHError;
 
@@ -2357,7 +3299,13 @@ begin
       begin
         K := N;
         repeat
+          if FDebugMode then dbg('libssh2_sftp_write:');
           R := libssh2_sftp_write(FHandle, Buf, K);
+          while (R = LIBSSH2_ERROR_EAGAIN) do begin
+            waitsocket();
+            R := libssh2_sftp_write(FHandle, Buf, K);
+          end;
+          if FDebugMode then dbg('libssh2_sftp_write. R:'+IntToStr(R));
           if R < 0 then
             RaiseSSHError;
           Inc(Transfered, R);
@@ -2371,63 +3319,107 @@ begin
     until (N <= 0) or FCanceled;
   finally
     FreeMem(StartBuf);
-    libssh2_sftp_close(FHandle);
+    if FDebugMode then dbg('libssh2_sftp_close:');
+    R := libssh2_sftp_close(FHandle);
+    //C := 100;
+    while (R = LIBSSH2_ERROR_EAGAIN) {and (C > 0)} do begin
+      //Dec(C);
+      waitsocket();
+      R := libssh2_sftp_close(FHandle);
+    end;
+    if FDebugMode then dbg('libssh2_sftp_close. R:'+IntToStr(R));
   end;
 end;
 
-procedure TSFTPClient.RaiseSSHError(const AMsg: string; E: Integer);
-begin
-  inherited;
-  //
-end;
+//procedure TSFTPClient.RaiseSSHError(const AMsg: string; E: Integer);
+//begin
+//  inherited;
+//end;
 
 procedure TSFTPClient.Rename(const AOldName, ANewName: WideString);
+var
+  R: Integer;
 begin
   FCanceled := False;
-  if libssh2_sftp_rename(FSFtp, PAnsiChar(MyEncode(AOldName)), PAnsiChar(MyEncode(ANewName)))
-    <> 0 then
+  if FDebugMode then dbg('libssh2_sftp_rename:');
+  R := libssh2_sftp_rename(FSFtp, PAnsiChar(MyEncode(AOldName)), PAnsiChar(MyEncode(ANewName)));
+  while (R = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    R := libssh2_sftp_rename(FSFtp, PAnsiChar(MyEncode(AOldName)), PAnsiChar(MyEncode(ANewName)));
+  end;
+  if FDebugMode then dbg('libssh2_sftp_rename. R:'+IntToStr(R));
+  if R <> 0 then
     RaiseSSHError;
 end;
 
 function TSFTPClient.ResolveSymLink(const AOrigin: WideString;
   var AAtributes: LIBSSH2_SFTP_ATTRIBUTES; ARealPath: Boolean): string;
-const
-  BUF_LEN = 4 * 1024;
 var
-  Target: array [0 .. BUF_LEN - 1] of AnsiChar;
-  R: Integer;
+  R, link_type: Integer;
+  rawTarget, rawAOrigin: AnsiString;
 begin
   FCanceled := False;
   Result := '';
-  if not ARealPath then
-    R := libssh2_sftp_readlink(FSFtp, PAnsiChar(MyEncode(AOrigin)), PAnsiChar(@Target), BUF_LEN)
+  rawAOrigin := MyEncode(AOrigin);
+  if ARealPath then
+    link_type := LIBSSH2_SFTP_REALPATH_
   else
-    R := libssh2_sftp_realpath(FSFtp, PAnsiChar(MyEncode(AOrigin)), PAnsiChar(@Target), BUF_LEN);
-
-  if R > 0 then
-  begin
-    Result := MyDecode(Target);
-    libssh2_sftp_stat(FSFtp, PAnsiChar(@Target), AAtributes);
-  end
-  else
+    link_type := LIBSSH2_SFTP_READLINK_;
+  SetLength(rawTarget, 4*1024);
+  R := LIBSSH2_ERROR_EAGAIN;
+  while (R = LIBSSH2_ERROR_EAGAIN) do begin
+    if FDebugMode then dbg('libssh2_sftp_symlink_ex:');
+    R := libssh2_sftp_symlink_ex(FSFtp, PAnsiChar(rawAOrigin), Length(rawAOrigin),
+      PAnsiChar(rawTarget), Length(rawTarget), link_type);
+    if (R = LIBSSH2_ERROR_BUFFER_TOO_SMALL) then begin
+      if Length(rawTarget) > 16*1024 then
+        Break;
+      SetLength(rawTarget, 4*1024 + Length(rawTarget));
+      R := LIBSSH2_ERROR_EAGAIN;
+    end else if (R = LIBSSH2_ERROR_EAGAIN) then
+      waitsocket();
+  end;
+  if FDebugMode then dbg('libssh2_sftp_symlink_ex. R:'+IntToStr(R));
+  if R <= 0 then
     RaiseSSHError;
+  Result := MyDecode(rawTarget);
+  FillChar(AAtributes, SizeOf(AAtributes), 1);
+  if FDebugMode then dbg('libssh2_sftp_stat:');
+  R := libssh2_sftp_stat(FSFtp, PAnsiChar(rawTarget), AAtributes);
+  while (R = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    R := libssh2_sftp_stat(FSFtp, PAnsiChar(rawTarget), AAtributes);
+  end;
+  if FDebugMode then dbg('libssh2_sftp_stat. R:'+IntToStr(R));
+  //if R < 0 then
+  //  RaiseSSHError;
 end;
 
 procedure TSFTPClient.SetAttributes(const APath: WideString; AAtribs: LIBSSH2_SFTP_ATTRIBUTES);
+var
+  R: Integer; rawPath: AnsiString;
 begin
   FCanceled := False;
-  if libssh2_sftp_setstat(FSFtp, PAnsiChar(MyEncode(APath)), AAtribs) <> 0 then
+  rawPath := MyEncode(APath);
+  if FDebugMode then dbg('libssh2_sftp_SETstat:');
+  R := libssh2_sftp_setstat(FSFtp, PAnsiChar(rawPath), AAtribs);
+  while (R = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    FCanceled := False;
+    R := libssh2_sftp_setstat(FSFtp, PAnsiChar(rawPath), AAtribs);
+  end;
+  if FDebugMode then dbg('libssh2_sftp_SETstat. R:'+IntToStr(R));
+  if R <> 0 then
     RaiseSSHError;
 end;
 
 procedure TSFTPClient.SetCurrentDir(const Value: string);
 begin
-  if FCurrentDir <> Value then
-    if ChangeDir(Value) then
-    begin
-      FCurrentDir := Value;
-      FItems.Path := Value;
-    end;
+  if (FCurrentDir <> Value) and ChangeDir(Value) then
+  begin
+    FCurrentDir := Value;
+    FItems.Path := Value;
+  end;
 end;
 
 procedure TSFTPClient.SetPermissions(const APath: WideString; const AOctalPerms: string);
@@ -2439,7 +3431,7 @@ procedure TSFTPClient.SetPermissions(const APath: WideString; APerms: Cardinal);
 var
   Attribs: LIBSSH2_SFTP_ATTRIBUTES;
 begin
-  FillChar(Attribs, sizeof(Attribs), 0);
+  FillChar(Attribs, SizeOf(Attribs), 0);
   Attribs.Flags := LIBSSH2_SFTP_ATTR_PERMISSIONS;
   Attribs.Permissions := APerms;
   SetAttributes(APath, Attribs);
@@ -2459,26 +3451,39 @@ const
   BUF_LEN = 24 * 1024 - 1;
 var
   Channel: PLIBSSH2_CHANNEL;
-  N, R, K: Integer;
+  N, R, C: Integer;
   Buf: array [0 .. BUF_LEN - 1] of AnsiChar;
+  rawSourceFileName: AnsiString;
 begin
-  //
   FCanceled := False;
-  Channel := libssh2_scp_recv(GetSessionPtr, PAnsiChar(MyEncode(ASourceFileName)), AStat);
+  rawSourceFileName := MyEncode(ASourceFileName);
+  if FDebugMode then dbg('libssh2_scp_recv:');
+  Channel := libssh2_scp_recv(GetSessionPtr, PAnsiChar(rawSourceFileName), AStat);
+  while (Channel = nil) and (libssh2_session_last_errno(FSession) = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+      FCanceled := False;
+    Channel := libssh2_scp_recv(GetSessionPtr, PAnsiChar(rawSourceFileName), AStat);
+  end;
+  if FDebugMode then dbg('libssh2_scp_recv. R:'+BoolToStr(Channel<>nil, True));
   if Channel = nil then
     RaiseSSHError;
   try
     N := 0;
-    K := BUF_LEN;
+    C := BUF_LEN;
     while (N < AStat.st_size) and not FCanceled do
     begin
-      if AStat.st_size - N < K then
-        K := AStat.st_size - N;
-
-      R := libssh2_channel_read(Channel, Buf, K);
-      if K = R then
+      if AStat.st_size - N < C then
+        C := AStat.st_size - N;
+      if FDebugMode then dbg('libssh2_channel_read:');
+      R := libssh2_channel_read(Channel, Buf, C);
+      while (R = LIBSSH2_ERROR_EAGAIN) do begin
+        waitsocket();
+        libssh2_channel_read(Channel, Buf, C);
+      end;
+      if FDebugMode then dbg('libssh2_channel_read. R:'+IntToStr(R));
+      if C = R then
       begin
-        ADest.Write(Buf, K);
+        ADest.Write(Buf, C);
         if Assigned(FOnTProgress) then
           FOnTProgress(Self, ASourceFileName, N, AStat.st_size);
       end
@@ -2487,7 +3492,15 @@ begin
       Inc(N, R);
     end;
   finally
-    libssh2_channel_free(Channel);
+    if FDebugMode then dbg('libssh2_channel_free:');
+    R := libssh2_channel_free(Channel);
+    //C := 100;
+    while (R = LIBSSH2_ERROR_EAGAIN) {and (C > 0)} do begin
+      //Dec(C);
+      waitsocket();
+      R := libssh2_channel_free(Channel);
+    end;
+    if FDebugMode then dbg('libssh2_channel_free. R:'+IntToStr(R));
   end;
 end;
 
@@ -2501,6 +3514,7 @@ var
   Buf, StartBuf: PAnsiChar;
   N, K, R: Integer;
   Transfered: UInt64;
+  rawDestFileName: AnsiString;
 begin
   //
   FCanceled := False;
@@ -2509,8 +3523,16 @@ begin
   else
     Mode := LIBSSH2_SFTP_S_IRUSR or LIBSSH2_SFTP_S_IWUSR or LIBSSH2_SFTP_S_IRGRP or
       LIBSSH2_SFTP_S_IROTH;
-  Channel := libssh2_scp_send64(GetSessionPtr, PAnsiChar(MyEncode(ADestFileName)), Mode, AFileSize,
+  rawDestFileName := MyEncode(ADestFileName);
+  if FDebugMode then dbg('libssh2_scp_send64:');
+  Channel := libssh2_scp_send64(GetSessionPtr, PAnsiChar(rawDestFileName), Mode, AFileSize,
     DateTimeToUnix(ATime), DateTimeToUnix(MTime));
+  while (Channel = nil) and (libssh2_session_last_errno(FSession) = LIBSSH2_ERROR_EAGAIN) do begin
+    waitsocket();
+    Channel := libssh2_scp_send64(GetSessionPtr, PAnsiChar(rawDestFileName), Mode, AFileSize,
+      DateTimeToUnix(ATime), DateTimeToUnix(MTime));
+  end;
+   if FDebugMode then dbg('libssh2_scp_send64. R:'+BoolToStr(Channel<>nil, True));
   if Channel = nil then
     RaiseSSHError;
   GetMem(Buf, BUF_LEN);
@@ -2523,7 +3545,13 @@ begin
       begin
         K := N;
         repeat
+          if FDebugMode then dbg('libssh2_channel_write:');
           R := libssh2_channel_write(Channel, Buf, K);
+          while (R = LIBSSH2_ERROR_EAGAIN) do begin
+            waitsocket();
+            R := libssh2_channel_write(Channel, Buf, K);
+          end;
+          if FDebugMode then dbg('libssh2_channel_write. R:'+IntToStr(R));
           if R < 0 then
             RaiseSSHError;
           Inc(Transfered, R);
@@ -2535,23 +3563,52 @@ begin
         Buf := StartBuf;
       end;
     until (N <= 0) or FCanceled;
-    libssh2_channel_send_eof(Channel);
-    libssh2_channel_wait_eof(Channel);
-    libssh2_channel_wait_closed(Channel);
+    if FDebugMode then dbg('libssh2_channel_send_eof:');
+    R := libssh2_channel_send_eof(Channel);
+    while (R = LIBSSH2_ERROR_EAGAIN) do begin
+      waitsocket();
+      R := libssh2_channel_send_eof(Channel);
+    end;
+    if FDebugMode then dbg('libssh2_channel_send_eof. R:'+IntToStr(R));
+    if FDebugMode then dbg('libssh2_channel_wait_eof:');
+    R := libssh2_channel_wait_eof(Channel);
+    while (R = LIBSSH2_ERROR_EAGAIN) do begin
+      waitsocket();
+      R := libssh2_channel_wait_eof(Channel);
+    end;
+    if FDebugMode then dbg('libssh2_channel_wait_eof. R:'+IntToStr(R));
+    if FDebugMode then dbg('libssh2_channel_wait_closed:');
+    R := libssh2_channel_wait_closed(Channel);
+    while (R = LIBSSH2_ERROR_EAGAIN) do begin
+      waitsocket();
+      R := libssh2_channel_wait_closed(Channel);
+    end;
+    if FDebugMode then dbg('libssh2_channel_wait_closed. R:'+IntToStr(R));
   finally
     FreeMem(Buf);
-    libssh2_channel_free(Channel);
+    if FDebugMode then dbg('libssh2_channel_free:');
+    R := libssh2_channel_free(Channel);
+    //C := 100;
+    while (R = LIBSSH2_ERROR_EAGAIN) {and (C > 0)} do begin
+      //Dec(C);
+      waitsocket();
+      R := libssh2_channel_free(Channel);
+    end;
+    if FDebugMode then dbg('libssh2_channel_free. R:'+IntToStr(R));
   end;
 end;
 
 initialization
   GSSH2Init := 0;
+  WSDataInit();
   {$if declared(uHVDll)}
   dll_ws2_32 := TDll.Create(dll_ws2_32_name, dll_ws2_32_entires);
   //dll_ws2_32.Load(); // @dbg
   {$ifend}
 finalization
+  WSDataFInit();
   {$if declared(uHVDll)}
-  dll_ws2_32.Unload;
+  if Assigned(dll_ws2_32) then
+    dll_ws2_32.Unload;
   {$ifend}
 end.

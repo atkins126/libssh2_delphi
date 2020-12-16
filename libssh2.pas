@@ -1,4 +1,4 @@
-{ libssh2.pas } // version: 2020.0919.0015
+{ libssh2.pas } // version: 2020.1112.0835
 { **
   *  Delphi/Pascal Wrapper around the library "libssh2"
   *    Base repository:
@@ -75,10 +75,15 @@ const
     + '-x64'          // optional
      {$ENDIF}
     + '.dll'          // optional
-  {$ENDIF}
+  {$ELSE !MSWINDOWS}
   {$IFDEF LINUX}
     + '.so'
-  {$ENDIF}
+  {$ELSE}
+    {$IFDEF BSD}
+    + '.dylib'
+    {$ENDIF}
+  {$ENDIF !LINUX}
+  {$ENDIF !MSWINDOWS}
   ;
 
 type
@@ -104,7 +109,7 @@ const
 {-to make the BANNER define (used by src/session.c) be a valid SSH }
 {-banner. Release versions have no appended strings and may of course not }
 {=have dashes either. }
-  _LIBSSH2_VERSION = '1.2.6';
+  _LIBSSH2_VERSION = '1.9.0';
 
 {+// The numeric version number is also available "in parts" by using these }
 {=defines: }
@@ -200,6 +205,7 @@ type
   PLIBSSH2_AGENT = ^LIBSSH2_AGENT;
 
   SIZE_T = UINT;
+  PSIZE_T = ^SIZE_T;
 
   _LIBSSH2_USERAUTH_KBDINT_PROMPT = record
     text: PAnsiChar;
@@ -1071,6 +1077,18 @@ function libssh2_channel_flush(channel: PLIBSSH2_CHANNEL): Integer; inline;
 function libssh2_channel_flush_stderr(channel: PLIBSSH2_CHANNEL): Integer; inline;
 
 {$if not declared(uHVDll)}
+function libssh2_channel_get_exit_signal(channel: PLIBSSH2_CHANNEL;
+  exitsignal: PAnsiChar; exitsignal_len: PSIZE_T;
+  errmsg: PAnsiChar; errmsg_len: PSIZE_T;
+  langtag: PAnsiChar; langtag_len: PSIZE_T): Integer; cdecl;
+{$else}
+var libssh2_channel_get_exit_signal: function(channel: PLIBSSH2_CHANNEL;
+      exitsignal: PAnsiChar; exitsignal_len: PSIZE_T;
+      errmsg: PAnsiChar; errmsg_len: PSIZE_T;
+      langtag: PAnsiChar; langtag_len: PSIZE_T): Integer; cdecl;
+{$ifend}
+
+{$if not declared(uHVDll)}
 function libssh2_channel_get_exit_status(channel: PLIBSSH2_CHANNEL): Integer; cdecl;
 {$else}
 var libssh2_channel_get_exit_status: function(channel: PLIBSSH2_CHANNEL): Integer; cdecl;
@@ -1748,6 +1766,7 @@ procedure libssh2_channel_set_blocking; external libssh2_name{$ifdef allow_delay
 procedure libssh2_channel_handle_extended_data; external libssh2_name{$ifdef allow_delayed} delayed{$endif};
 function libssh2_channel_handle_extended_data2; external libssh2_name{$ifdef allow_delayed} delayed{$endif};
 function libssh2_channel_flush_ex; external libssh2_name{$ifdef allow_delayed} delayed{$endif};
+function libssh2_channel_get_exit_signal; external libssh2_name{$ifdef allow_delayed} delayed{$endif};
 function libssh2_channel_get_exit_status; external libssh2_name{$ifdef allow_delayed} delayed{$endif};
 function libssh2_channel_send_eof; external libssh2_name{$ifdef allow_delayed} delayed{$endif};
 function libssh2_channel_eof; external libssh2_name{$ifdef allow_delayed} delayed{$endif};
@@ -1787,7 +1806,7 @@ function libssh2_trace_sethandler; external libssh2_name{$ifdef allow_delayed} d
 {$else}
 var
   dll_libssh2 : TDll;
-  dll_libssh2_entires : array[0..81] of HVDll.TEntry = (
+  dll_libssh2_entires : array[0..82] of HVDll.TEntry = (
     (Proc: @@libssh2_init; Name: 'libssh2_init'),
     (Proc: @@libssh2_exit; Name: 'libssh2_exit'),
     (Proc: @@libssh2_session_init_ex; Name: 'libssh2_session_init_ex'),
@@ -1836,6 +1855,7 @@ var
     (Proc: @@libssh2_channel_handle_extended_data; Name: 'libssh2_channel_handle_extended_data'),
     (Proc: @@libssh2_channel_handle_extended_data2; Name: 'libssh2_channel_handle_extended_data2'),
     (Proc: @@libssh2_channel_flush_ex; Name: 'libssh2_channel_flush_ex'),
+    (Proc: @@libssh2_channel_get_exit_signal; Name: 'libssh2_channel_get_exit_signal'),
     (Proc: @@libssh2_channel_get_exit_status; Name: 'libssh2_channel_get_exit_status'),
     (Proc: @@libssh2_channel_send_eof; Name: 'libssh2_channel_send_eof'),
     (Proc: @@libssh2_channel_eof; Name: 'libssh2_channel_eof'),
